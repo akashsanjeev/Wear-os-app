@@ -701,13 +701,13 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
             <div className="space-y-3 max-w-3xl">
               <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-emerald-400">
                 <CheckCircle2 className="w-4 h-4" />
-                <span>v4 Ready · 2-Page Swipe Clock UI + Contact Name Caller ID + Full-Transaction 0x03 Lock</span>
+                <span>v5 Ready · Edge-to-Edge AMOLED Wear OS 5 Alerts + Bottom Page Dots + Back-Swipe Fix + Eco BLE</span>
               </div>
               <h1 className="text-2xl sm:text-3xl font-bold text-white font-display">
-                Sync &amp; Download Updated <code className="text-sky-300 font-mono">OP2R-iOS-Bridge-WearOS5.apk</code> (v4)
+                Sync &amp; Download Updated <code className="text-sky-300 font-mono">OP2R-iOS-Bridge-WearOS5.apk</code> (v5)
               </h1>
               <p className="text-sm text-slate-300 leading-relaxed">
-                This v4 update redesigns your watch into a <strong>2-Page Horizontal Swipe UI</strong> (<strong>Page 1</strong>: Digital Clock, Missed Calls &amp; Messages counters, and a single <em>Clear Counts</em> button so you never accidentally press controls; <strong>Page 2</strong>: Mode A Advertise button only with Scan Beacon B removed, plus a live <strong>Raw ANCS Attribute Inspector</strong>), holds the GATT lock until <code className="text-sky-300 font-mono">Data Source</code> finishes so messages never fall back to generic UID text, and automatically re-queries iOS Contacts at <code className="text-emerald-300 font-mono">+550ms / +1250ms</code> to display the <strong>Caller Contact Name + Phone Number</strong>.
+                This v5 update removes the outer blue square box and inner message box so incoming calls and notifications render on a <strong>native Wear OS 5.0 edge-to-edge pure black AMOLED surface</strong> with curved pill buttons, moves the <strong>horizontal page swipe indicators to the bottom center</strong>, disables system swipe-to-dismiss on Page 2 so <strong>swiping back returns to Page 1 (Clock) instead of closing the app</strong>, and automatically pauses high-power BLE advertising once your iPhone is subscribed (<code className="text-emerald-300 font-mono">ECO LINK • ADV OFF</code>) to save battery in Smart Mode without ever disconnecting your iPhone.
               </p>
 
               {/* Permanent 1-Click Direct Links for akashsanjeev/Wear-os-app */}
@@ -793,12 +793,6 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                         </span>
                       </div>
 
-                      {(githubStatus.headSha === '297b521' || githubStatus.headSha === 'e5cbf21') && (
-                        <div className="p-2.5 rounded-lg bg-amber-500/15 border border-amber-400/30 text-[11px] text-amber-200 leading-relaxed">
-                          GitHub is currently on commit <code className="font-mono font-bold">{githubStatus.headSha}</code> (v1 build). <strong>Sync/push this new v2 fix to GitHub now</strong>, wait ~60s, and click <strong>Refresh Status</strong> to download the v2 APK!
-                        </div>
-                      )}
-
                       <div className="flex flex-wrap items-center gap-2">
                         {githubStatus.directApkUrl && (
                           <a
@@ -835,28 +829,28 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
             <div className="p-4 rounded-2xl bg-[#0B0F17]/80 border border-slate-800 space-y-1.5">
               <div className="text-xs font-mono font-bold text-sky-400">
-                Step 1 · Sync This Fix to GitHub
+                1 · Native Wear OS 5 Alert Surface
               </div>
               <p className="text-xs text-slate-300 leading-relaxed">
-                Push/sync this commit from AI Studio to <code className="text-sky-300 font-mono">akashsanjeev/Wear-os-app</code>. This replaces the broken <code className="text-amber-300 font-mono">setup-android@v3</code> action with native <code className="text-sky-300 font-mono">$ANDROID_HOME</code> SDK tools.
+                Removed the outer blue square box and inner dark border box. Calls and messages now render directly on pure <code className="text-sky-300 font-mono">#000000</code> AMOLED black with curved pill buttons.
               </p>
             </div>
 
             <div className="p-4 rounded-2xl bg-[#0B0F17]/80 border border-slate-800 space-y-1.5">
               <div className="text-xs font-mono font-bold text-emerald-400">
-                Step 2 · Wait ~60s &amp; Click Refresh Status
+                2 · Eco Link BLE (Zero Auto-Disconnect)
               </div>
               <p className="text-xs text-slate-300 leading-relaxed">
-                GitHub Actions will compile <code className="text-emerald-300 font-mono">OP2R-iOS-Bridge-WearOS5.apk</code> with JDK 17 + Gradle 8.7 and publish it directly to your repository&rsquo;s <strong>Releases</strong> (<code className="text-sky-300 font-mono">latest-apk</code>) and <strong>Artifacts</strong>.
+                Stops 100ms peripheral advertising once your iPhone is subscribed to ANCS while keeping the active GATT connection + 45s keepalive ping 100% connected in Smart Mode.
               </p>
             </div>
 
             <div className="p-4 rounded-2xl bg-[#0B0F17]/80 border border-slate-800 space-y-1.5">
               <div className="text-xs font-mono font-bold text-cyan-300">
-                Step 3 · Click Direct Download .APK
+                3 · Bottom Page Dots &amp; Back-Swipe Fix
               </div>
               <p className="text-xs text-slate-300 leading-relaxed">
-                Click the green <strong>Direct Download OP2R-iOS-Bridge-WearOS5.apk</strong> button above (or grab <code className="text-sky-300 font-mono">op2r-ios-ancs-bridge-debug-apk</code> at the bottom of the workflow run page).
+                Disables <code className="text-sky-300 font-mono">windowSwipeToDismiss</code> so swiping back from Page 2 returns to Page 1 (Clock) instead of closing the app, with bottom-center page dots.
               </p>
             </div>
           </div>
@@ -871,7 +865,7 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                 <span>OnePlus Watch 2R (OPWWE234) 1:1 Circular Chord Geometry</span>
               </div>
               <h2 className="text-xl font-bold text-white font-display mt-0.5">
-                466×466 Round Watchface &amp; Inscribed Full-Screen Message Popup
+                466×466 Round Watchface &amp; Edge-to-Edge Wear OS 5 Alert Surface
               </h2>
             </div>
             <div className="flex items-center gap-2 text-xs text-slate-400 font-mono">
@@ -880,7 +874,11 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
               <span>
                 Active View:{' '}
                 <strong className="text-emerald-400">
-                  {activePopupNotification ? 'Full-Screen Message Card' : 'Single-Screen Control Deck'}
+                  {activePopupNotification
+                    ? 'Edge-to-Edge AMOLED Alert'
+                    : watchPage === 0
+                    ? 'Page 1: Clock & Counters'
+                    : 'Page 2: Controls & Eco BLE'}
                 </strong>
               </span>
             </div>
@@ -895,15 +893,15 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                 <div className="absolute -right-1.5 top-24 w-2.5 h-10 bg-slate-500 rounded-r-md border-l border-slate-700 shadow" />
                 <div className="absolute -right-1 top-56 w-2 h-8 bg-slate-600 rounded-r-md shadow" />
 
-                {/* 466x466 Scaled Circular AMOLED Viewport (360px x 360px container with exact percentage chord widths) */}
-                <div className="relative w-[340px] h-[340px] sm:w-[372px] sm:h-[372px] rounded-full bg-[#05070B] border-[12px] border-[#161E2E] shadow-inner flex flex-col items-center justify-center overflow-hidden">
+                {/* 466x466 Scaled Circular AMOLED Viewport */}
+                <div className="relative w-[340px] h-[340px] sm:w-[372px] sm:h-[372px] rounded-full bg-black border-[12px] border-[#161E2E] shadow-inner flex flex-col items-center justify-center overflow-hidden">
                   {/* Subtle Inner Circular Safe-Ring Guide */}
-                  <div className="absolute inset-2 rounded-full border border-slate-800/40 pointer-events-none z-10" />
+                  <div className="absolute inset-2 rounded-full border border-slate-800/30 pointer-events-none z-10" />
 
                   {/* Subtle Watch Glass Reflection */}
-                  <div className="absolute top-0 inset-x-0 h-24 bg-gradient-to-b from-white/[0.04] to-transparent rounded-t-full pointer-events-none z-30" />
+                  <div className="absolute top-0 inset-x-0 h-24 bg-gradient-to-b from-white/[0.03] to-transparent rounded-t-full pointer-events-none z-30" />
 
-                  {/* Watch Toast Pill (Tapered to 52% width at top arc so it never clips) */}
+                  {/* Watch Toast Pill */}
                   <AnimatePresence>
                     {watchToastMessage && (
                       <motion.div
@@ -918,125 +916,114 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                     )}
                   </AnimatePresence>
 
-                  {/* LAYER 2: CIRCULAR-INSCRIBED FULL-SCREEN NOTIFICATION MESSAGE OR CALL POPUP */}
+                  {/* LAYER 2: EDGE-TO-EDGE PURE BLACK AMOLED WEAR OS 5 ALERT SURFACE (NO BLUE/SQUARE BOX) */}
                   <AnimatePresence>
                     {activePopupNotification ? (
-                      activePopupNotification.isIncomingCall ? (
-                        /* INCOMING CALL CIRCULAR-INSCRIBED OVERLAY */
-                        <motion.div
-                          key={`call-${activePopupNotification.notificationUid}`}
-                          initial={{ opacity: 0, scale: 0.92 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          exit={{ opacity: 0, scale: 0.95 }}
-                          transition={{ type: 'spring', stiffness: 420, damping: 28 }}
-                          className="absolute inset-0 z-20 bg-gradient-to-b from-[#1A0B10] via-[#0B0910] to-[#05070B] flex flex-col items-center justify-center text-center"
+                      <motion.div
+                        key={`alert-${activePopupNotification.notificationUid}`}
+                        initial={{ opacity: 0, scale: 0.94 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.96 }}
+                        transition={{ type: 'spring', stiffness: 420, damping: 28 }}
+                        className="absolute inset-0 z-20 bg-black flex flex-col items-center justify-center text-center px-9 py-7"
+                      >
+                        {/* Top App / Category Capsule Pill */}
+                        <div
+                          className={`px-3 py-0.5 rounded-full text-[9.5px] font-mono font-bold truncate mb-1.5 ${
+                            activePopupNotification.isIncomingCall
+                              ? 'bg-[#062E22] border border-emerald-500 text-emerald-300'
+                              : 'bg-[#082438] border border-sky-500 text-sky-300'
+                          }`}
                         >
-                          {/* 1. Top Arc Call Badge (48% width) */}
-                          <div className="w-[48%] px-2.5 py-0.5 rounded-full bg-red-500/15 border border-red-500/40 text-[9.5px] font-mono text-red-300 truncate mb-2">
-                            IPHONE CALL
-                          </div>
+                          ●{' '}
+                          {activePopupNotification.isIncomingCall
+                            ? 'INCOMING CALL'
+                            : activePopupNotification.appDisplayName.toUpperCase()}
+                        </div>
 
-                          {/* 2. Pulsing Call Icon */}
-                          <div className="relative my-1.5 flex items-center justify-center">
-                            <div className="absolute w-14 h-14 rounded-full border border-red-500/30 animate-m3-sonar" />
-                            <div className="w-11 h-11 rounded-full bg-red-500/20 border border-red-500/50 flex items-center justify-center text-red-400">
-                              <PhoneIncoming className="w-5 h-5 animate-bounce" />
-                            </div>
-                          </div>
+                        {/* Bold Centered Contact Name / Sender Title */}
+                        <div
+                          className={`w-full font-bold text-white font-display leading-snug line-clamp-2 ${
+                            activePopupNotification.isIncomingCall ? 'text-[18px]' : 'text-[16px]'
+                          }`}
+                        >
+                          {activePopupNotification.title}
+                        </div>
 
-                          {/* 3. Equator Caller Info (76% width): Caller Name (0x01) + Phone Number Subtitle (0x02) */}
-                          <div className="w-[76%] my-1.5 space-y-0.5">
-                            <div className="text-sm font-bold text-white font-display truncate">
-                              {activePopupNotification.title}
-                            </div>
-                            {activePopupNotification.subtitle && (
-                              <div className="text-[11.5px] font-mono font-bold text-sky-400 truncate">
-                                ID: {activePopupNotification.subtitle}
-                              </div>
-                            )}
-                            <div className="text-[10.5px] text-slate-300 truncate">
-                              {activePopupNotification.message}
-                            </div>
+                        {/* Caller ID Phone Number / Subtitle */}
+                        {activePopupNotification.subtitle && (
+                          <div className="w-full text-[11px] font-mono font-bold text-sky-400 truncate mt-0.5 mb-1">
+                            {activePopupNotification.subtitle}
                           </div>
+                        )}
 
-                          {/* 4. Tapered Lower Arc Call Action Row (60% width so corners never touch bezel) */}
-                          <div className="w-[60%] grid grid-cols-2 gap-2 mt-2">
+                        {/* Borderless Scrollable Message Body Directly on Pure Black AMOLED */}
+                        <div className="w-full h-[84px] my-1.5 px-1 text-[13px] text-slate-200 leading-relaxed overflow-y-auto flex items-center justify-center text-center">
+                          <div className="max-h-full overflow-y-auto">
+                            {activePopupNotification.message}
+                          </div>
+                        </div>
+
+                        {/* Bottom Curved Pill Action Buttons */}
+                        {activePopupNotification.isIncomingCall ? (
+                          <div className="w-full grid grid-cols-2 gap-2 mt-1">
                             <motion.button
-                              whileHover={{ scale: 1.04 }}
-                              whileTap={{ scale: 0.94 }}
+                              whileHover={{ scale: 1.03 }}
+                              whileTap={{ scale: 0.95 }}
                               onClick={() =>
                                 handlePerformCallAction(
                                   activePopupNotification.notificationUid,
                                   0x01
                                 )
                               }
-                              className="h-8 rounded-full bg-red-600 hover:bg-red-500 border border-red-400 text-white text-[10.5px] font-semibold flex items-center justify-center gap-1 shadow cursor-pointer"
+                              className="h-8 rounded-full bg-red-600 hover:bg-red-500 border border-red-400 text-white text-[10.5px] font-semibold flex items-center justify-center gap-1 cursor-pointer"
                             >
                               <PhoneOff className="w-3 h-3" />
                               <span>Decline</span>
                             </motion.button>
 
                             <motion.button
-                              whileHover={{ scale: 1.04 }}
-                              whileTap={{ scale: 0.94 }}
+                              whileHover={{ scale: 1.03 }}
+                              whileTap={{ scale: 0.95 }}
                               onClick={() =>
                                 handlePerformCallAction(
                                   activePopupNotification.notificationUid,
                                   0x00
                                 )
                               }
-                              className="h-8 rounded-full bg-emerald-600 hover:bg-emerald-500 border border-emerald-400 text-white text-[10.5px] font-semibold flex items-center justify-center gap-1 shadow cursor-pointer"
+                              className="h-8 rounded-full bg-emerald-600 hover:bg-emerald-500 border border-emerald-400 text-white text-[10.5px] font-semibold flex items-center justify-center gap-1 cursor-pointer"
                             >
                               <PhoneIncoming className="w-3 h-3" />
-                              <span>Accept</span>
+                              <span>Answer</span>
                             </motion.button>
                           </div>
-                        </motion.div>
-                      ) : (
-                        /* STANDARD MESSAGE CIRCULAR-INSCRIBED POPUP CARD (50% -> 72% -> 80% -> 50%) */
-                        <motion.div
-                          key={`msg-${activePopupNotification.notificationUid}`}
-                          initial={{ opacity: 0, scale: 0.93 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          exit={{ opacity: 0, scale: 0.95 }}
-                          transition={{ type: 'spring', stiffness: 420, damping: 28 }}
-                          className="absolute inset-0 z-20 bg-[#060911] flex flex-col items-center justify-center text-center"
-                        >
-                          {/* 1. Tapered Top App Badge (50% of watch width) */}
-                          <div className="w-[50%] px-2.5 py-0.5 rounded-full bg-[#14263B] border border-sky-400/60 text-sky-300 text-[10px] font-mono flex items-center justify-center gap-1 truncate mb-1">
-                            <MessageSquareText className="w-3 h-3 text-sky-400 shrink-0" />
-                            <span className="truncate">{activePopupNotification.appDisplayName}</span>
-                          </div>
+                        ) : (
+                          <div className="w-full grid grid-cols-2 gap-2 mt-1">
+                            <motion.button
+                              whileHover={{ scale: 1.03 }}
+                              whileTap={{ scale: 0.95 }}
+                              onClick={() =>
+                                handleSimulateRemoteRemove(
+                                  activePopupNotification.notificationUid,
+                                  activePopupNotification.categoryId
+                                )
+                              }
+                              className="h-8 rounded-full bg-[#1E293B] hover:bg-[#273549] border border-[#334155] text-white text-[10.5px] font-semibold flex items-center justify-center cursor-pointer"
+                            >
+                              Dismiss
+                            </motion.button>
 
-                          {/* 2. Sender / Title (0x01) + Subtitle / Caller ID (0x02) */}
-                          <div className="w-[72%] text-[13.5px] font-bold text-white font-display truncate">
-                            {activePopupNotification.title}
+                            <motion.button
+                              whileHover={{ scale: 1.03 }}
+                              whileTap={{ scale: 0.95 }}
+                              onClick={() => setActiveWatchPopupUid(null)}
+                              className="h-8 rounded-full bg-[#0F172A] hover:bg-[#1E293B] border border-[#1E293B] text-slate-200 text-[10.5px] font-semibold flex items-center justify-center cursor-pointer"
+                            >
+                              Close
+                            </motion.button>
                           </div>
-                          {activePopupNotification.subtitle && (
-                            <div className="w-[72%] text-[10.5px] font-mono text-sky-400 truncate mb-1">
-                              {activePopupNotification.subtitle}
-                            </div>
-                          )}
-
-                          {/* 3. Inscribed Equator Scrollable Message Box (80% of watch width, 112px height) */}
-                          <div className="w-[80%] h-[112px] p-3 rounded-2xl bg-[#111827] border border-slate-800 text-[12px] text-slate-100 leading-relaxed overflow-y-auto flex items-center justify-center text-center shadow-inner mb-2">
-                            <div className="max-h-full overflow-y-auto">
-                              {activePopupNotification.message}
-                            </div>
-                          </div>
-
-                          {/* 4. Tapered Bottom Dismiss Pill Button (50% of watch width — sits cleanly in lower arc) */}
-                          <motion.button
-                            whileHover={{ scale: 1.03 }}
-                            whileTap={{ scale: 0.95 }}
-                            onClick={() => setActiveWatchPopupUid(null)}
-                            className="w-[50%] h-8 rounded-full bg-[#1E293B] hover:bg-[#273549] border border-sky-400/70 text-[11px] font-semibold text-white flex items-center justify-center gap-1 shadow cursor-pointer"
-                          >
-                            <X className="w-3 h-3 text-sky-400 shrink-0" />
-                            <span>Dismiss</span>
-                          </motion.button>
-                        </motion.div>
-                      )
+                        )}
+                      </motion.div>
                     ) : null}
                   </AnimatePresence>
 
@@ -1044,9 +1031,9 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                   <div className="relative w-full h-full flex items-center justify-center text-center">
                     {watchPage === 0 ? (
                       /* PAGE 1: CLEAN CURVED LAYOUT (CENTERED DIGITAL CLOCK + COMPACT STATUS CHIPS + CLEAR COUNTS PILL) */
-                      <div className="w-[78%] flex flex-col items-center justify-center space-y-2 py-7">
+                      <div className="w-[78%] flex flex-col items-center justify-center space-y-2 pb-4">
                         {/* Compact Top Connection Pill inside safe upper chord */}
-                        <div className="max-w-[76%] px-2.5 py-0.5 rounded-full bg-[#0B1520] border border-slate-800 text-[9.5px] font-mono font-bold text-emerald-400 truncate">
+                        <div className="max-w-[78%] px-2.5 py-0.5 rounded-full bg-[#0B1520] border border-slate-800 text-[9.5px] font-mono font-bold text-emerald-400 truncate">
                           ● {watchState.includes('Bonded') ? 'CONNECTED • iPhone' : watchState}
                         </div>
 
@@ -1090,7 +1077,7 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                             : 'Tap chip to view last alert'}
                         </div>
 
-                        {/* Compact Centered Clear Counts Pill (sits comfortably above bottom bezel curve) */}
+                        {/* Compact Centered Clear Counts Pill */}
                         <motion.button
                           whileHover={{ scale: 1.03 }}
                           whileTap={{ scale: 0.95 }}
@@ -1106,18 +1093,20 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                       </div>
                     ) : (
                       /* PAGE 2: CENTER-WEIGHTED SCROLL WITH GENEROUS CIRCULAR TOP & BOTTOM PADDING */
-                      <div className="w-full h-full overflow-y-auto pt-16 pb-20 px-9 flex flex-col items-center space-y-2">
+                      <div className="w-full h-full overflow-y-auto pt-14 pb-16 px-9 flex flex-col items-center space-y-1.5">
                         <div className="text-[10px] font-mono font-bold text-sky-400 shrink-0">
                           CONTROLS • MODE A
                         </div>
                         <div className="text-[9.5px] font-bold text-emerald-400 shrink-0">
-                          {watchState.includes('Bonded') ? 'CONNECTED • ALWAYS-ON' : watchState}
+                          {watchState.includes('Bonded')
+                            ? 'CONNECTED • ECO LINK (ADV OFF)'
+                            : watchState}
                         </div>
                         <div className="text-[9px] font-mono text-slate-400 truncate shrink-0">
-                          Src:{watchAlerts.length} • 0x03:{watchAlerts.length} • HB:14 • -54dBm
+                          Src:{watchAlerts.length} • 0x03:{watchAlerts.length} • HB(45s):14
                         </div>
 
-                        {/* Single Dedicated Mode A Button (Scan Beacon B Removed) */}
+                        {/* Single Dedicated Mode A Button */}
                         <motion.button
                           whileHover={{ scale: 1.02 }}
                           whileTap={{ scale: 0.96 }}
@@ -1151,7 +1140,7 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                                 title: 'Sarah Jenkins',
                                 subtitle: '+1 (415) 890-4321',
                                 message:
-                                  'Hey! Full 256-byte ANCS Attribute 0x03 message body + Contact Name resolved cleanly!',
+                                  'Hey! Full 256-byte ANCS Attribute 0x03 message body + Contact Name on edge-to-edge AMOLED!',
                               })
                             }
                             className="h-7 rounded-full bg-indigo-600 hover:bg-indigo-500 border border-indigo-400/60 text-[10px] font-semibold text-white cursor-pointer"
@@ -1160,8 +1149,16 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                           </button>
                         </div>
 
+                        {/* Smart Mode Battery Optimization Pill */}
+                        <button
+                          onClick={() => showWatchToast('Smart Mode Battery: Unrestricted ✓')}
+                          className="w-full h-7 rounded-full bg-[#064E3B] border border-emerald-500 text-[9.5px] font-semibold text-white shrink-0 cursor-pointer"
+                        >
+                          Smart Mode: Unrestricted ✓
+                        </button>
+
                         {/* Raw ANCS Attribute Inspector */}
-                        <div className="w-full p-2.5 rounded-xl bg-[#111827] border border-slate-800 text-left text-[8.5px] font-mono text-slate-200 leading-tight space-y-0.5 shrink-0">
+                        <div className="w-full p-2 rounded-xl bg-[#0B0F17] border border-slate-800 text-left text-[8.5px] font-mono text-slate-200 leading-tight space-y-0.5 shrink-0">
                           <div className="text-sky-400 font-bold">RAW ANCS INSPECTOR</div>
                           <div className="truncate">
                             App(0x00): {watchAlerts[0]?.appBundleId || '—'}
@@ -1179,20 +1176,28 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                       </div>
                     )}
 
-                    {/* SUBTLE SIDE ARC DOTS ALONG RIGHT CIRCULAR BEZEL (Replaces bottom clipped text footer) */}
+                    {/* BOTTOM HORIZONTAL PAGE INDICATORS (MATCHES HORIZONTAL SWIPE) */}
                     <button
                       onClick={() => setWatchPage((prev) => (prev === 0 ? 1 : 0))}
-                      title={watchPage === 0 ? 'Switch to Page 2: Controls & Raw ANCS Inspector' : 'Switch to Page 1: Clock & Counters'}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-1.5 px-1.5 py-2.5 rounded-full bg-[#0D131F]/90 border border-slate-800 hover:border-sky-500/50 cursor-pointer transition-colors"
+                      title={
+                        watchPage === 0
+                          ? 'Swipe Left -> Page 2: Controls & Eco BLE'
+                          : 'Swipe Right / Back -> Page 1: Clock & Counters'
+                      }
+                      className="absolute bottom-2.5 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-[#0A0F18]/95 border border-slate-800 hover:border-sky-500/50 cursor-pointer transition-all"
                     >
                       <span
-                        className={`w-2 h-2 rounded-full transition-colors ${
-                          watchPage === 0 ? 'bg-sky-400 shadow-[0_0_6px_#38bdf8]' : 'bg-zinc-600'
+                        className={`h-1.5 rounded-full transition-all ${
+                          watchPage === 0
+                            ? 'w-4 bg-sky-400 shadow-[0_0_6px_#38bdf8]'
+                            : 'w-1.5 bg-zinc-600'
                         }`}
                       />
                       <span
-                        className={`w-2 h-2 rounded-full transition-colors ${
-                          watchPage === 1 ? 'bg-sky-400 shadow-[0_0_6px_#38bdf8]' : 'bg-zinc-600'
+                        className={`h-1.5 rounded-full transition-all ${
+                          watchPage === 1
+                            ? 'w-4 bg-sky-400 shadow-[0_0_6px_#38bdf8]'
+                            : 'w-1.5 bg-zinc-600'
                         }`}
                       />
                     </button>

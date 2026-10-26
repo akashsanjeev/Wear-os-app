@@ -113,9 +113,10 @@ class AncsBridgeService : Service() {
         // Preferred BLE MTU for 256-byte ANCS Data Source payloads
         private const val PREFERRED_ANCS_MTU = 247
 
-        // Keepalive & Reconnect intervals
-        private const val KEEPALIVE_HEARTBEAT_INTERVAL_MS = 20_000L
-        private const val AUTO_RECONNECT_INTERVAL_MS = 5_000L
+        // Keepalive & Reconnect intervals (Optimized for OnePlus Watch 2R Smart Mode battery life)
+        private const val KEEPALIVE_HEARTBEAT_INTERVAL_MS = 45_000L
+        private const val AUTO_RECONNECT_FAST_INTERVAL_MS = 5_000L
+        private const val AUTO_RECONNECT_CONNECTED_INTERVAL_MS = 15_000L
         private const val DATA_SOURCE_IDLE_FLUSH_MS = 320L
         private const val ZERO_DATA_SOURCE_FALLBACK_MS = 2_400L
 
@@ -129,6 +130,8 @@ class AncsBridgeService : Service() {
         val connectedDeviceAddress: String? = null,
         val isBonded: Boolean = false,
         val isAncsSubscribed: Boolean = false,
+        val isAdvertising: Boolean = false,
+        val powerSaveState: String = "ACTIVE SCAN",
         val negotiatedMtu: Int = 23,
         val missedCallCount: Int = 0,
         val unreadMessageCount: Int = 0,
@@ -348,7 +351,11 @@ class AncsBridgeService : Service() {
         continuousReconnectJob?.cancel()
         continuousReconnectJob = serviceScope.launch {
             while (isActive) {
-                delay(AUTO_RECONNECT_INTERVAL_MS)
+                val isFullyConnected = _bridgeState.value.isAncsSubscribed && activeGatt != null
+                delay(
+                    if (isFullyConnected) AUTO_RECONNECT_CONNECTED_INTERVAL_MS
+                    else AUTO_RECONNECT_FAST_INTERVAL_MS
+                )
                 if (userStoppedBridge) continue
 
                 if (_bridgeState.value.isAncsSubscribed && activeGatt != null) {
@@ -439,6 +446,10 @@ class AncsBridgeService : Service() {
         try {
             bleAdvertiser?.startAdvertising(settings, advertiseData, scanResponse, modeAAdvertiseCallback)
             isAdvertisingModeA = true
+            _bridgeState.value = _bridgeState.value.copy(
+                isAdvertising = true,
+                powerSaveState = "ADVERTISING (100ms)"
+            )
             if (!_bridgeState.value.isAncsSubscribed) {
                 updateStatus("ADVERTISING (MODE A)")
                 startBridgeForegroundNotification("Advertising OP2R-Bridge to iPhone...")
@@ -456,6 +467,10 @@ class AncsBridgeService : Service() {
         } catch (ignored: Exception) {
         } finally {
             isAdvertisingModeA = false
+            _bridgeState.value = _bridgeState.value.copy(
+                isAdvertising = false,
+                powerSaveState = if (_bridgeState.value.isAncsSubscribed) "ECO LINK (ADV OFF)" else "IDLE"
+            )
         }
     }
 
@@ -613,6 +628,9 @@ class AncsBridgeService : Service() {
                     isBonded = bonded
                 )
                 startBridgeForegroundNotification("Connected to ${device.name ?: "iPhone"}")
+                try {
+                    gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                } catch (ignored: Exception) {}
                 startKeepAliveHeartbeat(gatt)
 
                 mainHandler.postDelayed({
@@ -632,7 +650,8 @@ class AncsBridgeService : Service() {
                 ancsPacketParser.resetParser()
                 _bridgeState.value = _bridgeState.value.copy(
                     statusText = "RECONNECTING...",
-                    isAncsSubscribed = false
+                    isAncsSubscribed = false,
+                    powerSaveState = "RECONNECTING"
                 )
                 startBridgeForegroundNotification("Reconnecting to iPhone...")
                 closeActiveGatt()
@@ -714,13 +733,22 @@ class AncsBridgeService : Service() {
                         ignorePreExistingAlerts = false
                     }, 3000L)
 
+                    // Switch GATT link to BALANCED priority and stop redundant peripheral advertising
+                    // to save battery while keeping the active iPhone GATT connection 100% alive.
+                    try {
+                        gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
+                    } catch (ignored: Exception) {}
+                    stopModeAPeripheralAdvertising()
+
                     _bridgeState.value = _bridgeState.value.copy(
-                        statusText = "CONNECTED • ALWAYS-ON",
+                        statusText = "CONNECTED • ECO LINK",
                         isBonded = true,
-                        isAncsSubscribed = true
+                        isAncsSubscribed = true,
+                        isAdvertising = false,
+                        powerSaveState = "ECO LINK (ADV OFF)"
                     )
-                    startBridgeForegroundNotification("Connected to iPhone • Always-On ANCS")
-                    appendLog("ANCS Active! Ready for Calls & Messages")
+                    startBridgeForegroundNotification("Connected to iPhone • Eco ANCS Active")
+                    appendLog("ANCS Subscribed! Stopped beacon to save battery (GATT link active)")
                 }
             } else {
                 appendLog("CCCD write error ($status)")
@@ -1247,13 +1275,15 @@ class AncsBridgeService : Service() {
     private fun wakeWatchScreenBriefly() {
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            val wakeLock = pm.newWakeLock(
-                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
-                    PowerManager.ACQUIRE_CAUSES_WAKEUP or
-                    PowerManager.ON_AFTER_RELEASE,
-                "op2r:ancs_alert_wakeup"
-            )
-            wakeLock.acquire(5000L)
+            if (!pm.isInteractive) {
+                val wakeLock = pm.newWakeLock(
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                        PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                        PowerManager.ON_AFTER_RELEASE,
+                    "op2r:ancs_alert_wakeup"
+                )
+                wakeLock.acquire(3500L)
+            }
         } catch (ignored: Exception) {}
     }
 

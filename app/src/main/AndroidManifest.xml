@@ -41,7 +41,7 @@
         android:allowBackup="true"
         android:label="OP2R iOS Bridge"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.DeviceDefault">
+        android:theme="@style/Theme.OP2RBridge">
 
         <meta-data
             android:name="com.google.android.wearable.standalone"
@@ -53,6 +53,7 @@
             android:launchMode="singleTop"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
+            android:theme="@style/Theme.OP2RBridge"
             android:taskAffinity="">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

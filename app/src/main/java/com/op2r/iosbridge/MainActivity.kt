@@ -1,6 +1,7 @@
 package com.op2r.iosbridge
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
@@ -8,8 +9,11 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.GestureDetector
@@ -24,6 +28,7 @@ import android.widget.ScrollView
 import android.widget.TextClock
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
@@ -39,14 +44,15 @@ import kotlin.math.abs
  * Implements a 2-Page Horizontal Swipe UI inside the inscribed circular safe area:
  * - Page 1 (Main Watch Face - Zero Accidental Presses):
  *   Digital Clock, Date, Connection Status, Missed Calls Counter Pill, Messages Counter Pill,
- *   and a single "Clear Counts" button.
- * - Page 2 (Swipe Side - Controls & Raw Diagnostics):
- *   Dedicated "Advertise iPhone (Mode A)" button (Mode B removed), "Re-Sync", "Test Alert",
- *   Live Raw ANCS Attribute Inspector (Title 0x01, Subtitle 0x02, Message 0x03, AppID 0x00),
- *   and BLE Telemetry Logs.
- * - Full-Screen Popup Overlay:
- *   Wakes the watch to display Incoming Calls (Contact Name + Phone Number + Accept/Decline)
- *   and Full 256-Byte Message Body cards.
+ *   and a single "Clear Counts" pill button.
+ * - Page 2 (Swipe Left - Controls, Smart Mode Battery Optimizer & Raw Diagnostics):
+ *   Dedicated "Advertise iPhone (Mode A)" button, Smart Mode Battery Exemption status,
+ *   "Re-Sync", "Test Alert", Live Raw ANCS Attribute Inspector, and BLE Telemetry Logs.
+ * - Bottom Horizontal Page Indicators:
+ *   Positioned at bottom-center to match the horizontal swipe gesture.
+ * - Edge-to-Edge AMOLED Notification & Call Surface (No Blue/Square Box):
+ *   Renders incoming calls and 256-byte messages directly on a pure #000000 circular AMOLED
+ *   canvas with a top category pill badge and bottom curved pill buttons.
  */
 class MainActivity : ComponentActivity() {
 
@@ -67,14 +73,15 @@ class MainActivity : ComponentActivity() {
     private lateinit var page1LastPreviewText: TextView
     private lateinit var page1ClearButton: Button
 
-    // Page 2 Views (Center-Weighted Scroll Controls + Raw ANCS Attribute Inspector + Logs)
+    // Page 2 Views (Center-Weighted Scroll Controls + Battery Eco Status + Raw ANCS Inspector)
     private lateinit var statusBadgeView: TextView
     private lateinit var deviceInfoView: TextView
     private lateinit var telemetryStatsView: TextView
+    private lateinit var batteryEcoButton: Button
     private lateinit var rawAttributesBoxView: TextView
     private lateinit var logFeedView: TextView
 
-    // Full-screen circular popup overlay views
+    // Edge-to-Edge Circular AMOLED Notification/Call Surface Views (No Square Box)
     private lateinit var popupOverlayContainer: FrameLayout
     private lateinit var popupCategoryBadge: TextView
     private lateinit var popupAppNameView: TextView
@@ -88,6 +95,11 @@ class MainActivity : ComponentActivity() {
     private var activePopupUid: Int = -1
     private var lastShownPopupSignature: String = ""
     private lateinit var swipeGestureDetector: GestureDetector
+
+    // Direct touch tracking so both fast flings and slower horizontal drag-swipes work reliably
+    private var touchDownX: Float = 0f
+    private var touchDownY: Float = 0f
+    private var horizontalSwipeHandledInTouch: Boolean = false
 
     private val requiredPermissions: Array<String>
         get() = buildList {
@@ -117,6 +129,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableWakeAndShowWhenLocked()
         setupHorizontalSwipeDetector()
+        setupBackNavigationHandler()
         setContentView(buildCircularTwoPageWatchLayout())
         ensurePermissionsAndStartBridge()
         handleIncomingPopupIntent(intent)
@@ -124,7 +137,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        refreshBatteryOptimizationBadge()
         startObservingBridgeState()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshBatteryOptimizationBadge()
     }
 
     override fun onStop() {
@@ -139,12 +158,52 @@ class MainActivity : ComponentActivity() {
         handleIncomingPopupIntent(intent)
     }
 
+    private fun setupBackNavigationHandler() {
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    if (::popupOverlayContainer.isInitialized &&
+                        popupOverlayContainer.visibility == View.VISIBLE
+                    ) {
+                        popupOverlayContainer.visibility = View.GONE
+                        return
+                    }
+                    if (currentPageIndex == 1) {
+                        switchToPage(0)
+                        return
+                    }
+                    // On Page 1 (Clock) with no popup open: exit app normally
+                    finish()
+                }
+            }
+        )
+    }
+
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
-        if (::popupOverlayContainer.isInitialized &&
-            popupOverlayContainer.visibility != View.VISIBLE &&
-            ::swipeGestureDetector.isInitialized
-        ) {
-            swipeGestureDetector.onTouchEvent(ev)
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                touchDownX = ev.rawX
+                touchDownY = ev.rawY
+                horizontalSwipeHandledInTouch = false
+            }
+            MotionEvent.ACTION_UP -> {
+                if (!horizontalSwipeHandledInTouch) {
+                    val deltaX = ev.rawX - touchDownX
+                    val deltaY = ev.rawY - touchDownY
+                    if (abs(deltaX) > abs(deltaY) * 1.25f && abs(deltaX) > dp(34)) {
+                        if (handleHorizontalSwipeGesture(deltaX, touchDownX)) {
+                            horizontalSwipeHandledInTouch = true
+                            return true
+                        }
+                    }
+                }
+            }
+        }
+
+        if (::swipeGestureDetector.isInitialized && swipeGestureDetector.onTouchEvent(ev)) {
+            horizontalSwipeHandledInTouch = true
+            return true
         }
         return super.dispatchTouchEvent(ev)
     }
@@ -159,17 +218,11 @@ class MainActivity : ComponentActivity() {
                     velocityX: Float,
                     velocityY: Float
                 ): Boolean {
-                    if (e1 == null) return false
-                    val deltaX = e2.x - e1.x
-                    val deltaY = e2.y - e1.y
-                    if (abs(deltaX) > abs(deltaY) && abs(deltaX) > dp(34) && abs(velocityX) > 160f) {
-                        if (deltaX < 0 && currentPageIndex == 0) {
-                            switchToPage(1)
-                            return true
-                        } else if (deltaX > 0 && currentPageIndex == 1) {
-                            switchToPage(0)
-                            return true
-                        }
+                    if (e1 == null || horizontalSwipeHandledInTouch) return false
+                    val deltaX = e2.rawX - e1.rawX
+                    val deltaY = e2.rawY - e1.rawY
+                    if (abs(deltaX) > abs(deltaY) * 1.2f && abs(deltaX) > dp(30) && abs(velocityX) > 130f) {
+                        return handleHorizontalSwipeGesture(deltaX, e1.rawX)
                     }
                     return false
                 }
@@ -177,18 +230,59 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun handleHorizontalSwipeGesture(deltaX: Float, startX: Float): Boolean {
+        // 1. If a full-screen notification/call alert is visible, swiping right dismisses the overlay
+        if (::popupOverlayContainer.isInitialized &&
+            popupOverlayContainer.visibility == View.VISIBLE
+        ) {
+            if (deltaX > dp(38)) {
+                popupOverlayContainer.visibility = View.GONE
+                return true
+            }
+            return false
+        }
+
+        // 2. Swiping left on Page 1 (Clock) -> opens Page 2 (Controls)
+        if (deltaX < 0 && currentPageIndex == 0) {
+            switchToPage(1)
+            return true
+        }
+
+        // 3. Swiping right on Page 2 (Controls) -> returns to Page 1 (Clock) instead of closing app
+        if (deltaX > 0 && currentPageIndex == 1) {
+            switchToPage(0)
+            return true
+        }
+
+        // 4. Swiping right from the left bezel while already on Page 1 (Clock) -> exits the app
+        if (deltaX > dp(62) && currentPageIndex == 0 && startX <= dp(44)) {
+            finish()
+            return true
+        }
+
+        return false
+    }
+
     private fun switchToPage(pageIndex: Int) {
         currentPageIndex = pageIndex.coerceIn(0, 1)
         if (currentPageIndex == 0) {
             page1ClockContainer.visibility = View.VISIBLE
             page2ControlsScroll.visibility = View.GONE
-            pageDot1View.background = createCircleDotDrawable("#38BDF8")
-            pageDot2View.background = createCircleDotDrawable("#3F3F46")
+            pageDot1View.layoutParams = LinearLayout.LayoutParams(dp(16), dp(5)).apply {
+                marginEnd = dp(6)
+            }
+            pageDot2View.layoutParams = LinearLayout.LayoutParams(dp(5), dp(5))
+            pageDot1View.background = createPillIndicatorDrawable("#38BDF8")
+            pageDot2View.background = createPillIndicatorDrawable("#3F3F46")
         } else {
             page1ClockContainer.visibility = View.GONE
             page2ControlsScroll.visibility = View.VISIBLE
-            pageDot1View.background = createCircleDotDrawable("#3F3F46")
-            pageDot2View.background = createCircleDotDrawable("#38BDF8")
+            pageDot1View.layoutParams = LinearLayout.LayoutParams(dp(5), dp(5)).apply {
+                marginEnd = dp(6)
+            }
+            pageDot2View.layoutParams = LinearLayout.LayoutParams(dp(16), dp(5))
+            pageDot1View.background = createPillIndicatorDrawable("#3F3F46")
+            pageDot2View.background = createPillIndicatorDrawable("#38BDF8")
         }
     }
 
@@ -211,7 +305,7 @@ class MainActivity : ComponentActivity() {
     private fun buildCircularTwoPageWatchLayout(): View {
         val metrics = resources.displayMetrics
         val screenMinPx = minOf(metrics.widthPixels, metrics.heightPixels)
-        // Safe chord width (80% of 466px diameter = ~372px / 186dp) for equatorial elements
+        // Safe chord width (~78% of 466px diameter) for equatorial elements
         val safeCenterWidthPx = (screenMinPx * 0.78f).toInt().coerceAtLeast(dp(176))
         val safeHorizontalPaddingPx = ((screenMinPx - safeCenterWidthPx) / 2).coerceAtLeast(dp(26))
 
@@ -221,17 +315,16 @@ class MainActivity : ComponentActivity() {
 
         // =====================================================================
         // PAGE 1: ONEPLUS WATCH 2R CLEAN CURVED CLOCK & COMPACT STATUS CHIPS
-        // Centered vertically in the wide 466px equatorial zone so neither the
-        // top status pill nor the bottom Clear Counts button clips on the bezel.
+        // Centered vertically with bottom clearance for the horizontal page dots.
         // =====================================================================
         page1ClockContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(
                 safeHorizontalPaddingPx,
-                dp(28),
+                dp(22),
                 safeHorizontalPaddingPx,
-                dp(28)
+                dp(32)
             )
         }
 
@@ -243,7 +336,7 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            background = createRoundedDrawable("#0B1520", "#1E293B", dp(12))
+            background = createRoundedDrawable("#0B1520", "#1E293B", dp(999))
             setPadding(dp(10), dp(3), dp(10), dp(3))
         }
 
@@ -280,7 +373,7 @@ class MainActivity : ComponentActivity() {
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             maxLines = 1
-            background = createRoundedDrawable("#1F1218", "#881337", dp(14))
+            background = createRoundedDrawable("#1F1218", "#881337", dp(999))
             setPadding(dp(10), dp(5), dp(10), dp(5))
             setOnClickListener {
                 val last = AncsBridgeService.bridgeState.value.lastNotification
@@ -295,7 +388,7 @@ class MainActivity : ComponentActivity() {
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             maxLines = 1
-            background = createRoundedDrawable("#0F1B29", "#0369A1", dp(14))
+            background = createRoundedDrawable("#0F1B29", "#0369A1", dp(999))
             setPadding(dp(10), dp(5), dp(10), dp(5))
             setOnClickListener {
                 val last = AncsBridgeService.bridgeState.value.lastNotification
@@ -333,7 +426,8 @@ class MainActivity : ComponentActivity() {
         page1ClearButton = createWatchActionButton(
             label = "Clear Counts",
             bgColorHex = "#1E293B",
-            cornerRadiusDp = 14
+            strokeColorHex = "#334155",
+            cornerRadiusDp = 999
         ) {
             startBridgeService(AncsBridgeService.ACTION_CLEAR_COUNTERS)
         }
@@ -363,14 +457,12 @@ class MainActivity : ComponentActivity() {
         )
         page1ClockContainer.addView(
             page1ClearButton,
-            LinearLayout.LayoutParams(dp(112), dp(28))
+            LinearLayout.LayoutParams(dp(116), dp(28))
         )
 
         // =====================================================================
         // PAGE 2: CENTER-WEIGHTED SCROLL FOR 466x466 ROUND DISPLAY
-        // Generous top (72dp) & bottom (80dp) circular padding with clipToPadding=false
-        // so the top header and bottom Raw ANCS Inspector scroll smoothly into the
-        // wide center equator without ever clipping against the curved bezel.
+        // Generous top (68dp) & bottom (84dp) circular padding with clipToPadding=false.
         // =====================================================================
         page2ControlsScroll = ScrollView(this).apply {
             setBackgroundColor(Color.BLACK)
@@ -379,9 +471,9 @@ class MainActivity : ComponentActivity() {
             clipToPadding = false
             setPadding(
                 safeHorizontalPaddingPx,
-                dp(72),
+                dp(68),
                 safeHorizontalPaddingPx,
-                dp(80)
+                dp(84)
             )
             visibility = View.GONE
         }
@@ -421,13 +513,14 @@ class MainActivity : ComponentActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
             typeface = Typeface.MONOSPACE
             gravity = Gravity.CENTER
-            setPadding(0, dp(1), 0, dp(6))
+            setPadding(0, dp(1), 0, dp(5))
         }
 
         val advertiseModeAButton = createWatchActionButton(
             label = "Advertise iPhone (Mode A)",
             bgColorHex = "#0284C7",
-            cornerRadiusDp = 14
+            strokeColorHex = "#38BDF8",
+            cornerRadiusDp = 999
         ) {
             startBridgeService(AncsBridgeService.ACTION_START_MODE_A_PERIPHERAL)
         }
@@ -435,13 +528,14 @@ class MainActivity : ComponentActivity() {
         val diagRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(5), 0, dp(6))
+            setPadding(0, dp(5), 0, dp(5))
         }
 
         val resyncButton = createWatchActionButton(
             label = "Re-Sync",
             bgColorHex = "#0F766E",
-            cornerRadiusDp = 12
+            strokeColorHex = "#14B8A6",
+            cornerRadiusDp = 999
         ) {
             startBridgeService(AncsBridgeService.ACTION_RESYNC_ANCS)
         }
@@ -449,7 +543,8 @@ class MainActivity : ComponentActivity() {
         val testAlertButton = createWatchActionButton(
             label = "Test Alert",
             bgColorHex = "#4F46E5",
-            cornerRadiusDp = 12
+            strokeColorHex = "#818CF8",
+            cornerRadiusDp = 999
         ) {
             startBridgeService(AncsBridgeService.ACTION_SIMULATE_TEST_ALERT)
         }
@@ -461,13 +556,22 @@ class MainActivity : ComponentActivity() {
             marginStart = dp(4)
         })
 
+        batteryEcoButton = createWatchActionButton(
+            label = "Smart Mode Battery: Check",
+            bgColorHex = "#064E3B",
+            strokeColorHex = "#10B981",
+            cornerRadiusDp = 999
+        ) {
+            requestSmartModeBatteryExemption()
+        }
+
         rawAttributesBoxView = TextView(this).apply {
             text = "RAW ANCS INSPECTOR\nApp(0x00): —\nTitle(0x01): —\nSub(0x02): —\nMsg(0x03): —"
             setTextColor(Color.parseColor("#E2E8F0"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
             typeface = Typeface.MONOSPACE
             gravity = Gravity.START
-            background = createRoundedDrawable("#111827", "#1E293B", dp(12))
+            background = createRoundedDrawable("#0B0F17", "#1E293B", dp(12))
             setPadding(dp(10), dp(7), dp(10), dp(7))
         }
 
@@ -499,6 +603,15 @@ class MainActivity : ComponentActivity() {
             )
         )
         page2Container.addView(
+            batteryEcoButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(28)
+            ).apply {
+                bottomMargin = dp(6)
+            }
+        )
+        page2Container.addView(
             rawAttributesBoxView,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -516,36 +629,35 @@ class MainActivity : ComponentActivity() {
         page2ControlsScroll.addView(page2Container)
 
         // =====================================================================
-        // SUBTLE SIDE ARC DOTS (RIGHT BEZEL EDGE INDICATOR)
-        // Replaces the bottom footer so the bottom circular arc is never clipped.
+        // BOTTOM HORIZONTAL PAGE INDICATORS (MATCHES HORIZONTAL SWIPE)
         // =====================================================================
-        val sideArcPagerDots = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        val bottomHorizontalPagerDots = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            background = createRoundedDrawable("#0D131F", "#1E293B", dp(10))
-            setPadding(dp(5), dp(8), dp(5), dp(8))
+            background = createRoundedDrawable("#0A0F18", "#1E293B", dp(999))
+            setPadding(dp(10), dp(5), dp(10), dp(5))
             setOnClickListener {
                 switchToPage(if (currentPageIndex == 0) 1 else 0)
             }
         }
 
         pageDot1View = View(this).apply {
-            background = createCircleDotDrawable("#38BDF8")
+            background = createPillIndicatorDrawable("#38BDF8")
         }
 
         pageDot2View = View(this).apply {
-            background = createCircleDotDrawable("#3F3F46")
+            background = createPillIndicatorDrawable("#3F3F46")
         }
 
-        sideArcPagerDots.addView(
+        bottomHorizontalPagerDots.addView(
             pageDot1View,
-            LinearLayout.LayoutParams(dp(6), dp(6)).apply {
-                bottomMargin = dp(5)
+            LinearLayout.LayoutParams(dp(16), dp(5)).apply {
+                marginEnd = dp(6)
             }
         )
-        sideArcPagerDots.addView(
+        bottomHorizontalPagerDots.addView(
             pageDot2View,
-            LinearLayout.LayoutParams(dp(6), dp(6))
+            LinearLayout.LayoutParams(dp(5), dp(5))
         )
 
         rootFrame.addView(
@@ -563,17 +675,17 @@ class MainActivity : ComponentActivity() {
             )
         )
         rootFrame.addView(
-            sideArcPagerDots,
+            bottomHorizontalPagerDots,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER_VERTICAL or Gravity.END
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
             ).apply {
-                marginEnd = dp(6)
+                bottomMargin = dp(10)
             }
         )
 
-        popupOverlayContainer = buildCircularInscribedNotificationPopup(safeHorizontalPaddingPx)
+        popupOverlayContainer = buildEdgeToEdgeWearOsAlertSurface(safeHorizontalPaddingPx)
         rootFrame.addView(
             popupOverlayContainer,
             FrameLayout.LayoutParams(
@@ -585,65 +697,69 @@ class MainActivity : ComponentActivity() {
         return rootFrame
     }
 
-    private fun buildCircularInscribedNotificationPopup(safeHorizontalPaddingPx: Int): FrameLayout {
+    /**
+     * Native Wear OS 5.0 Edge-to-Edge AMOLED Notification & Call Surface.
+     * No outer rectangular blue box and no inner bordered message box:
+     * renders directly on pure #000000 AMOLED black with circular safe insets,
+     * a top category capsule pill, bold sender header, borderless scrollable text,
+     * and full-pill bottom buttons.
+     */
+    private fun buildEdgeToEdgeWearOsAlertSurface(safeHorizontalPaddingPx: Int): FrameLayout {
         val overlay = FrameLayout(this).apply {
-            setBackgroundColor(Color.parseColor("#F5000000"))
+            setBackgroundColor(Color.BLACK)
             visibility = View.GONE
             isClickable = true
             isFocusable = true
         }
 
-        val cardWrapper = LinearLayout(this).apply {
+        val circularSurface = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(
                 safeHorizontalPaddingPx,
-                dp(34),
+                dp(26),
                 safeHorizontalPaddingPx,
-                dp(34)
+                dp(26)
             )
         }
 
-        val cardBox = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            background = createRoundedDrawable("#111827", "#38BDF8", dp(18))
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-        }
-
         popupCategoryBadge = TextView(this).apply {
-            text = "NEW MESSAGE"
+            text = "● MESSAGE"
             setTextColor(Color.parseColor("#38BDF8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             gravity = Gravity.CENTER
+            maxLines = 1
+            background = createRoundedDrawable("#082438", "#0284C7", dp(999))
+            setPadding(dp(12), dp(3), dp(12), dp(3))
         }
 
         popupAppNameView = TextView(this).apply {
-            text = "Messages"
-            setTextColor(Color.parseColor("#9CA3AF"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            text = ""
+            setTextColor(Color.parseColor("#64748B"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
             gravity = Gravity.CENTER
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, dp(1), 0, dp(2))
+            visibility = View.GONE
+            setPadding(0, dp(2), 0, 0)
         }
 
         popupTitleView = TextView(this).apply {
             text = "Contact Name"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            typeface = Typeface.DEFAULT_BOLD
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             gravity = Gravity.CENTER
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, dp(1), 0, dp(1))
+            setPadding(0, dp(6), 0, dp(2))
         }
 
         popupSubtitleView = TextView(this).apply {
             text = ""
             setTextColor(Color.parseColor("#38BDF8"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             gravity = Gravity.CENTER
             maxLines = 1
@@ -652,17 +768,18 @@ class MainActivity : ComponentActivity() {
             setPadding(0, 0, 0, dp(4))
         }
 
+        // Borderless, transparent ScrollView directly on the AMOLED black canvas
         val messageScroll = ScrollView(this).apply {
-            isVerticalScrollBarEnabled = true
-            background = createRoundedDrawable("#090D16", "#1F2937", dp(10))
-            setPadding(dp(8), dp(6), dp(8), dp(6))
+            isVerticalScrollBarEnabled = false
+            setBackgroundColor(Color.TRANSPARENT)
+            setPadding(dp(4), dp(4), dp(4), dp(6))
         }
 
         popupMessageView = TextView(this).apply {
             text = "Full 256-byte ANCS Attribute 0x03 message body..."
-            setTextColor(Color.parseColor("#F3F4F6"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-            setLineSpacing(0f, 1.15f)
+            setTextColor(Color.parseColor("#E2E8F0"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setLineSpacing(0f, 1.2f)
             gravity = Gravity.CENTER_HORIZONTAL
         }
 
@@ -677,55 +794,79 @@ class MainActivity : ComponentActivity() {
         val actionsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, 0)
+            setPadding(0, dp(8), 0, 0)
         }
 
-        popupPositiveButton = createWatchActionButton("Accept", "#059669", 12) {
+        popupPositiveButton = createWatchActionButton(
+            label = "Answer",
+            bgColorHex = "#059669",
+            strokeColorHex = "#10B981",
+            cornerRadiusDp = 999
+        ) {
             if (activePopupUid != -1) {
                 sendActionToBridge(AncsBridgeService.ACTION_PERFORM_POSITIVE, activePopupUid)
             }
             popupOverlayContainer.visibility = View.GONE
         }
 
-        popupNegativeButton = createWatchActionButton("Dismiss", "#DC2626", 12) {
+        popupNegativeButton = createWatchActionButton(
+            label = "Dismiss",
+            bgColorHex = "#1E293B",
+            strokeColorHex = "#334155",
+            cornerRadiusDp = 999
+        ) {
             if (activePopupUid != -1) {
                 sendActionToBridge(AncsBridgeService.ACTION_PERFORM_NEGATIVE, activePopupUid)
             }
             popupOverlayContainer.visibility = View.GONE
         }
 
-        popupCloseButton = createWatchActionButton("Close", "#374151", 12) {
+        popupCloseButton = createWatchActionButton(
+            label = "Close",
+            bgColorHex = "#0F172A",
+            strokeColorHex = "#1E293B",
+            cornerRadiusDp = 999
+        ) {
             popupOverlayContainer.visibility = View.GONE
         }
 
         actionsRow.addView(
-            popupPositiveButton,
-            LinearLayout.LayoutParams(0, dp(30), 1f).apply { marginEnd = dp(3) }
+            popupNegativeButton,
+            LinearLayout.LayoutParams(0, dp(34), 1f).apply {
+                marginEnd = dp(4)
+            }
         )
         actionsRow.addView(
-            popupNegativeButton,
-            LinearLayout.LayoutParams(0, dp(30), 1f).apply {
-                marginStart = dp(3)
-                marginEnd = dp(3)
+            popupPositiveButton,
+            LinearLayout.LayoutParams(0, dp(34), 1f).apply {
+                marginStart = dp(4)
             }
         )
         actionsRow.addView(
             popupCloseButton,
-            LinearLayout.LayoutParams(0, dp(30), 0.85f).apply { marginStart = dp(3) }
+            LinearLayout.LayoutParams(0, dp(34), 0.9f).apply {
+                marginStart = dp(4)
+            }
         )
 
-        cardBox.addView(popupCategoryBadge)
-        cardBox.addView(popupAppNameView)
-        cardBox.addView(popupTitleView)
-        cardBox.addView(popupSubtitleView)
-        cardBox.addView(
+        circularSurface.addView(
+            popupCategoryBadge,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        circularSurface.addView(popupAppNameView)
+        circularSurface.addView(popupTitleView)
+        circularSurface.addView(popupSubtitleView)
+        circularSurface.addView(
             messageScroll,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(74)
+                dp(86)
             )
         )
-        cardBox.addView(
+        circularSurface.addView(
             actionsRow,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -733,16 +874,8 @@ class MainActivity : ComponentActivity() {
             )
         )
 
-        cardWrapper.addView(
-            cardBox,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        )
-
         overlay.addView(
-            cardWrapper,
+            circularSurface,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -787,19 +920,24 @@ class MainActivity : ComponentActivity() {
         activePopupUid = alert.notificationUid
         val isCall = alert.categoryId == AncsPacketParser.CATEGORY_ID_INCOMING_CALL
 
-        popupCategoryBadge.text = if (isCall) "INCOMING IPHONE CALL" else alert.appDisplayName.uppercase()
-        popupCategoryBadge.setTextColor(
-            Color.parseColor(if (isCall) "#10B981" else "#38BDF8")
-        )
-        popupAppNameView.text = if (isCall) "iPhone Call • Caller ID" else alert.appIdentifier
+        if (isCall) {
+            popupCategoryBadge.text = "● INCOMING CALL"
+            popupCategoryBadge.setTextColor(Color.parseColor("#34D399"))
+            popupCategoryBadge.background = createRoundedDrawable("#062E22", "#10B981", dp(999))
+        } else {
+            popupCategoryBadge.text = "● ${alert.appDisplayName.uppercase()}"
+            popupCategoryBadge.setTextColor(Color.parseColor("#38BDF8"))
+            popupCategoryBadge.background = createRoundedDrawable("#082438", "#0284C7", dp(999))
+        }
+
         popupTitleView.text = alert.title.ifBlank { if (isCall) "Incoming Call" else alert.appDisplayName }
-        popupTitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (isCall) 15f else 14f)
+        popupTitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (isCall) 18f else 16f)
 
         if (alert.subtitle.isNotBlank() &&
             alert.subtitle != alert.title &&
             alert.subtitle != alert.appDisplayName
         ) {
-            popupSubtitleView.text = if (isCall) "Number: ${alert.subtitle}" else alert.subtitle
+            popupSubtitleView.text = alert.subtitle
             popupSubtitleView.visibility = View.VISIBLE
         } else {
             popupSubtitleView.visibility = View.GONE
@@ -808,16 +946,24 @@ class MainActivity : ComponentActivity() {
         popupMessageView.text = alert.message.ifBlank { alert.title }
 
         if (isCall) {
-            popupPositiveButton.visibility = View.VISIBLE
-            popupPositiveButton.text = "Accept"
             popupNegativeButton.visibility = View.VISIBLE
             popupNegativeButton.text = "Decline"
+            popupNegativeButton.background = createRoundedDrawable("#DC2626", "#EF4444", dp(999))
+
+            popupPositiveButton.visibility = View.VISIBLE
+            popupPositiveButton.text = "Answer"
+            popupPositiveButton.background = createRoundedDrawable("#059669", "#10B981", dp(999))
+
             popupCloseButton.visibility = View.GONE
         } else {
-            popupPositiveButton.visibility = if (alert.hasPositiveAction) View.VISIBLE else View.GONE
-            popupPositiveButton.text = "Action"
             popupNegativeButton.visibility = if (alert.hasNegativeAction) View.VISIBLE else View.GONE
             popupNegativeButton.text = "Dismiss"
+            popupNegativeButton.background = createRoundedDrawable("#1E293B", "#334155", dp(999))
+
+            popupPositiveButton.visibility = if (alert.hasPositiveAction) View.VISIBLE else View.GONE
+            popupPositiveButton.text = "Reply/Act"
+            popupPositiveButton.background = createRoundedDrawable("#0284C7", "#38BDF8", dp(999))
+
             popupCloseButton.visibility = View.VISIBLE
         }
 
@@ -835,6 +981,39 @@ class MainActivity : ComponentActivity() {
             lower.contains("gmail") || lower.contains("mobilemail") -> "Mail"
             lower.contains("slack") -> "Slack"
             else -> appId.substringAfterLast('.').ifBlank { "iPhone Alert" }
+        }
+    }
+
+    private fun refreshBatteryOptimizationBadge() {
+        if (!::batteryEcoButton.isInitialized) return
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val isUnrestricted = pm?.isIgnoringBatteryOptimizations(packageName) == true
+        if (isUnrestricted) {
+            batteryEcoButton.text = "Smart Mode: Unrestricted ✓"
+            batteryEcoButton.background = createRoundedDrawable("#064E3B", "#10B981", dp(999))
+        } else {
+            batteryEcoButton.text = "Allow Smart Mode Background"
+            batteryEcoButton.background = createRoundedDrawable("#78350F", "#F59E0B", dp(999))
+        }
+    }
+
+    @SuppressLint("BatteryLife")
+    private fun requestSmartModeBatteryExemption() {
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        if (pm?.isIgnoringBatteryOptimizations(packageName) == true) {
+            refreshBatteryOptimizationBadge()
+            return
+        }
+        try {
+            val intent = Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:$packageName")
+            )
+            startActivity(intent)
+        } catch (e: Exception) {
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (ignored: Exception) {}
         }
     }
 
@@ -869,13 +1048,13 @@ class MainActivity : ComponentActivity() {
                     page1LastPreviewText.text = "No unread alerts"
                 }
 
-                statusBadgeView.text = state.statusText
+                statusBadgeView.text = "${state.statusText} (${state.powerSaveState})"
                 val devName = state.connectedDeviceName ?: "No iPhone"
                 val bondTag = if (state.isBonded) "Bonded" else "Unbonded"
                 val rssiTag = if (state.lastRssi != 0) " • ${state.lastRssi}dBm" else ""
                 deviceInfoView.text = "$devName ($bondTag) • MTU ${state.negotiatedMtu}$rssiTag"
                 telemetryStatsView.text =
-                    "Src:${state.rxSourcePackets} • 0x03:${state.rxDataPackets} • HB:${state.keepAlivePings}"
+                    "Src:${state.rxSourcePackets} • 0x03:${state.rxDataPackets} • HB(45s):${state.keepAlivePings}"
 
                 rawAttributesBoxView.text = buildString {
                     append("RAW ANCS INSPECTOR\n")
@@ -921,23 +1100,26 @@ class MainActivity : ComponentActivity() {
     private fun createWatchActionButton(
         label: String,
         bgColorHex: String,
-        cornerRadiusDp: Int = 10,
+        strokeColorHex: String = "#3F3F46",
+        cornerRadiusDp: Int = 999,
         onClick: () -> Unit
     ): Button {
         return Button(this).apply {
             text = label
             isAllCaps = false
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            background = createRoundedDrawable(bgColorHex, "#3F3F46", dp(cornerRadiusDp))
-            setPadding(dp(6), dp(2), dp(6), dp(2))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            background = createRoundedDrawable(bgColorHex, strokeColorHex, dp(cornerRadiusDp))
+            setPadding(dp(8), dp(2), dp(8), dp(2))
             setOnClickListener { onClick() }
         }
     }
 
-    private fun createCircleDotDrawable(fillHex: String): GradientDrawable {
+    private fun createPillIndicatorDrawable(fillHex: String): GradientDrawable {
         return GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(999).toFloat()
             setColor(Color.parseColor(fillHex))
         }
     }

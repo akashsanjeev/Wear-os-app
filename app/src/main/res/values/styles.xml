@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Custom Wear OS 5.0 theme for OnePlus Watch 2R:
+         Disables system windowSwipeToDismiss so swiping back from Page 2 (Controls)
+         returns to Page 1 (Clock) instead of closing the application. -->
+    <style name="Theme.OP2RBridge" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowSwipeToDismiss">false</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:colorBackground">@android:color/black</item>
+    </style>
+</resources>

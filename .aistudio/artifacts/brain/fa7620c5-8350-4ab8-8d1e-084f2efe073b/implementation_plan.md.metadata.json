@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan to optimize the Wear OS application and Web simulator for the circular OnePlus Watch 2R (466x466 px display). Resolves top and bottom clipping on the clock screen and controls screen, replaces bottom footer with subtle side-arc bezel indicators, implements center-weighted scrolling with generous circular padding, and ensures robust CI build compatibility.",
-  "updatedAt":  "2026-10-26T19:50:40.094907047Z",
+  "summary":  "Implementation plan for native edge-to-edge AMOLED Wear OS 5.0 notification/call UI (removing the blue square card), bottom horizontal page indicators, Page 2 back-swipe navigation returning to Page 1 Clock, and Smart Mode BLE battery optimization without disconnecting the iPhone.",
+  "updatedAt":  "2026-10-26T20:25:54.160959035Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
