@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --font-sans: 'Public Sans', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+
+    /* Material 3 Tonal Elevation Palette */
+    --md-surface: #0B0F17;
+    --md-surface-container-lowest: #070A10;
+    --md-surface-container-low: #0F1523;
+    --md-surface-container: #141C2E;
+    --md-surface-container-high: #1B253D;
+    --md-surface-container-highest: #232F4C;
+    --md-primary: #38BDF8;
+    --md-primary-container: #0369A1;
+    --md-on-primary: #082F49;
+    --md-outline: #2B3857;
+    --md-outline-variant: #1E293B;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--md-surface);
+    color: #F8FAFC;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+
+  code, pre, .font-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Material 3 Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #232F4C;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #38BDF8;
+}
+
+/* Pulse animation for call incoming waves */
+@keyframes m3-sonar {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.85;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 0.35;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+.animate-m3-sonar {
+  animation: m3-sonar 2s cubic-bezier(0, 0.2, 0.8, 1) infinite;
+}
+
+.animate-m3-sonar-delayed {
+  animation: m3-sonar 2s cubic-bezier(0, 0.2, 0.8, 1) infinite;
+  animation-delay: 0.75s;
+}

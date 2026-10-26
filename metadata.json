@@ -1,0 +1,6 @@
+{
+  "name": "OP2R-Bridge: Wear OS 4 to iPhone ANCS BLE Bridge",
+  "description": "Standalone Wear OS 4 (API 33/34) Kotlin BLE ANCS Bridge for OnePlus Watch 2R (OPWWE234) and iPhone 14 with Dual-Mode Bonding, Multi-Packet Reassembly, and Interactive Protocol Simulator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
