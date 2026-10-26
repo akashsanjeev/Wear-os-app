@@ -1,88 +1,136 @@
-# OnePlus Watch 2R (`OPWWE234`) — Apple Watch-Grade Always-On BLE Connection, Caller ID & 256B Message Body Extraction
+# Implementation Plan: Wear OS 5.0 ANCS Bridge v4 (Swipeable Clock UI, Contact Name Caller ID & Robust 0x03 Message Delivery)
 
-This plan delivers a rock-solid, production-grade upgrade to the standalone **Wear OS 5.0 (Android 14 / API 34)** ANCS bridge on the **OnePlus Watch 2R (`OPWWE234`)**, ensuring the Bluetooth connection never dies, Caller ID (Name + Phone Number) is clearly displayed for all incoming calls, and full 256-byte message bodies are extracted and displayed without generic fallbacks.
+Resolve the missing contact name on incoming calls and generic message fallback text by restructuring the ANCS Control Point command and attribute mapper, eliminating the unused Scan Beacon B mode, and converting the watch face into a 2-page horizontal swipe layout (Page 1: Digital Clock + Missed Calls & Messages counters + Clear button; Page 2: Mode A Advertising + Re-Sync + Test Alert + Raw Attribute Inspector & Telemetry).
 
 ---
 
-### User Review & Critical Decisions
+## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> **Summary of Confirmed Choices**:
-> 1. **Caller ID Display**: Incoming calls will show the **Caller Name in a bold primary headline**, the **Phone Number as a distinct subtitle**, and large circular-safe **Accept / Decline buttons**.
-> 2. **Apple Watch-Grade Persistent BLE Connection**: The watch will never terminate peripheral advertising, will send a periodic 25-second GATT keepalive ping to reset iOS supervision timeouts, will request balanced BLE connection priority, and will instantly auto-reconnect if the link drops.
-> 3. **Full 256-Byte Message Card**: The circular-inscribed scrollable message box will cleanly render the complete 256-byte payload from Attribute `0x03` without clipping or generic placeholder replacement.
+> The user confirmed the following decisions during Phase 1:
+> - **Page 1 Layout**: Minimal digital time with call and message badge pills and a safe "Clear All" button.
+> - **Page Navigation**: Horizontal swipe between Page 1 (Clock & Counters) and Page 2 (Controls & Diagnostics) with page indicator dots (`● ○`).
+> - **Raw Attribute Diagnostics**: Page 2 will display the raw `Title`, `Subtitle`, and `Message` strings received from iOS to easily verify contact name delivery in real-time.
+> - **Option B Removal**: Mode B (Scan Beacon B) is completely removed from the UI so accidental presses are impossible; Mode A (`Advertise iPhone (A)`) is the dedicated connection mode.
 
 ---
 
-### 1. Overview & Core Concept
+## 1. Overview & Core Concept
 
 - **What It Does**:
-  1. **Permanent Always-On BLE Link**: Operates dual-role BLE (keeps peripheral advertising active even while connected so iOS can re-acquire the watch instantly if out-of-range, backed by a 25-second GATT keepalive heartbeat and aggressive `autoConnect` recovery).
-  2. **Caller ID Extraction (Attribute 0x01 & 0x02)**: Requests Subtitle (`0x02`, max 64B) alongside Title (`0x01`, max 64B) and App Identifier (`0x00`). Maps Title to Caller Name and Subtitle to Phone Number / Caller ID.
-  3. **256-Byte Message Body Extraction (Attribute 0x03)**: Prioritizes and dynamically reassembles Attribute `0x03` (Message Body) up to 256 bytes across MTU fragments without stalling on missing optional fields.
-  4. **Progressive Watch UI Updates**: Renders caller information and message content as soon as attributes arrive, seamlessly upgrading any preliminary alert in-place so generic fallback text is never shown.
+  1. **Page 1 (Glanceable Safe Watch Face)**: Displays a clean digital clock, real-time counters for **Missed Calls** and **Messages**, a safe **Clear** button, and connection status. Zero accidental button presses while wearing the watch.
+  2. **Page 2 (Swipe Right - Management & Diagnostics)**: Houses the Mode A (`Advertise iPhone (A)`) trigger, `Re-Sync ANCS` button, `Test Alert` button, raw ANCS attribute inspector (`Title`, `Subtitle`, `Message`, `AppID`), live BLE telemetry (RX Src/DS packets, keepalive pings, RSSI), and scrollable logs.
+  3. **Contact Name vs Phone Number Extraction**: Fixes the `GetNotificationAttributes` Control Point binary request format so iOS never drops the attribute query. Applies intelligent heuristic mapping: if one attribute contains letters and the other digits, the letters field is prioritized as the **Caller Contact Name** and the digits field as the **Phone Number**.
+  4. **Full 256-Byte Message Body Delivery**: Ensures `Data Source` packets are reliably requested and parsed without timing out into generic `"Social / Message - Notification #UID"` fallbacks.
+
+- **Target Hardware**: OnePlus Watch 2R (`OPWWE234`, 1.43" AMOLED, `466×466 px`, round display) running Wear OS 5.0 (Android 14 / API 34) paired with iPhone 14.
 
 ---
 
-### 2. User Experience & Visual Design
+## 2. User Experience & Visual Design
 
-- **OnePlus Watch 2R (`466×466 px`) Visual Layout**:
-  - **Incoming Call Screen**:
-    - Top Badge: `IPHONE CALL` (red-tinted pill)
-    - Primary Title: Caller Name (e.g. "John Doe" or unknown caller) in large bold font (`15sp`)
-    - Subtitle / Caller ID: Phone Number (e.g. "+1 (555) 019-2831" or carrier tag) in monospace cyan/slate text (`11sp`)
-    - Bottom Actions: Tapered circular-inscribed Accept (`0x00`) and Decline (`0x01`) buttons
-  - **Notification Message Screen**:
-    - Top Badge: App Name (e.g. WhatsApp, Messages, Mail)
-    - Sender Name: Bold contact title (`13.5sp`)
-    - Message Box: 80% width, 76dp high inscribed scrollable viewport displaying the full 256-byte message body
-    - Bottom Action: Tapered Dismiss pill (`50%` width)
-  - **Control Deck & Telemetry**:
-    - Header shows live packet counts (`NS:x DS:x`) and link heartbeat indicator (`Active / Alive`)
+### Page 1: Glanceable Clock & Safe Counters (Main Screen)
+- **Geometry**: Strict circular safe area (14.65% chord inset = ~68px on 466×466 display) to prevent bezel clipping.
+- **Header**: Quiet connection indicator (`● Connected` in emerald or `● Advertising (A)` in sky blue).
+- **Center**:
+  - Large digital clock: `10:24` (42sp bold tabular font).
+  - Date subtitle: `Monday, Oct 26` (12sp muted slate).
+- **Notification Counter Badges**:
+  - 📞 **Missed Calls**: `0 Missed Calls` (or `2 Missed Calls` in vibrant rose `#F43F5E` when > 0).
+  - 💬 **Messages**: `0 Messages` (or `3 Messages` in sky blue `#38BDF8` when > 0).
+- **Lower Arc**:
+  - Safe **Clear** button (`Clear All` with subtle rounded border, requiring intentional tap).
+  - Page indicator dots: `●  ○` (Swipe left/right indicator).
 
----
+### Page 2: Management & Diagnostics (Swipe Right)
+- **Navigation**: Smooth horizontal gesture or tap on page dots to switch.
+- **Top Row**: Mode A connection trigger: `Advertise iPhone (A)` (Option B is completely removed).
+- **Action Row**: `Re-Sync ANCS` and `Test Alert`.
+- **Raw Attribute Inspector Card**: Shows live values received from iOS:
+  - `Raw Title`: (e.g., `"John Appleseed"`)
+  - `Raw Subtitle`: (e.g., `"+1 (415) 555-0199"`)
+  - `Raw Message`: (e.g., `"Hey, let's meet at 6!"`)
+  - `Raw AppID`: (e.g., `"com.apple.mobilephone"`)
+- **Telemetry & Event Log**: Live packet counters (`Src: X`, `DS: Y`, `Heartbeat: Z`, `RSSI: -XX dBm`) and diagnostic log lines.
 
-### 3. Key Technical Decisions & Architecture
-
-#### A. Apple Watch-Grade Always-On BLE Link Architecture
-- **Never Stop Peripheral Advertising**: Previously, `AncsBridgeService` called `stopModeAPeripheralAdvertising()` upon subscription. On Wear OS 5.0, if iOS drops the connection when idle, iOS cannot re-find the watch. By keeping low-power peripheral advertising active indefinitely with ANCS service solicitation, iOS automatically re-connects whenever in proximity.
-- **25-Second GATT Keepalive Ping**: A background coroutine sends periodic lightweight GATT requests (reading Current Time or Heart Rate notify check) every 25 seconds, keeping the BES2700 Bluetooth co-processor and iOS supervision timers refreshed.
-- **Immediate Auto-Reconnect Loop**: On `STATE_DISCONNECTED`, the service immediately requests `connectGatt(..., autoConnect = true, ...)` and launches low-latency peripheral advertising, reconnecting within 1–2 seconds of returning to range.
-- **Connection Priority**: Sets `BluetoothGatt.CONNECTION_PRIORITY_BALANCED` on connection to prevent aggressive Android 14 radio sleep.
-
-#### B. ANCS Control Point & Data Source Parser Redesign
-- **Expanded Control Point Request (14 Bytes)**:
-  - Command ID: `0x00` (`GetNotificationAttributes`)
-  - Notification UID: 4 bytes (Little-Endian)
-  - Attribute `0x00`: App Identifier
-  - Attribute `0x01`: Title (64 bytes max)
-  - Attribute `0x02`: Subtitle / Caller ID (64 bytes max) — **NEW**
-  - Attribute `0x03`: Message (256 bytes max)
-- **Attribute Reassembly Engine**:
-  - Eliminates strict `EXPECTED_ATTRIBUTES` all-or-nothing requirement.
-  - For `CategoryID == 1` (Incoming Call): completes as soon as Title (`0x01`) and/or Subtitle (`0x02`) are extracted, without waiting for Message (`0x03`).
-  - For standard notifications: extracts `0x03` Message Body directly from the multi-packet byte stream, concatenating UTF-8 chunks until the full 256-byte payload is assembled.
-- **Progressive Delivery**:
-  - Broadcasts the caller's identity immediately to `MainActivity`.
-  - Replaces generic fallback strings with actual contact information and real message bodies.
+### Full-Screen Alert Overlays (Incoming Calls & Messages)
+- **Incoming Call Overlay**:
+  - Category badge: `INCOMING IPHONE CALL` (emerald).
+  - **Caller Contact Name**: Large bold white title (e.g., `John Appleseed`).
+  - **Phone Number**: Monospace sky-blue subtitle (e.g., `+1 (415) 555-0199`).
+  - Call actions: Green **Accept** (`0x00`) and Red **Decline** (`0x01`).
+- **Message Popup**:
+  - App badge + Contact Name + Full 256-byte message body in inscribed scrollable card + Dismiss button.
 
 ---
 
-### 4. Implementation Steps
+## 3. Technical Architecture & Component Structure
 
-1. **`AncsPacketParser.kt`**:
-   - Add `ATTRIBUTE_ID_SUBTITLE` (`0x02`) to the Control Point request buffer (`buildGetNotificationAttributesCommand`).
-   - Add `subtitle` property to `AssembledAncsNotification` for Caller ID phone number.
-   - Refactor attribute completion logic: emit immediately when relevant fields for the category arrive (calls prioritize Title + Subtitle; messages prioritize Title + Message).
-2. **`AncsBridgeService.kt`**:
-   - Keep peripheral advertising running continuously (do not stop advertising on connect).
-   - Implement 25-second periodic GATT keepalive heartbeat.
-   - Request `CONNECTION_PRIORITY_BALANCED` on connect.
-   - Update `presentFullScreenMessagePopupOnWatch` and notification dispatchers to pass `subtitle` (Caller ID phone number) to `MainActivity` and system notifications.
-   - Enhance disconnect handler to immediately re-arm `autoConnect` and low-latency advertising.
-3. **`MainActivity.kt`**:
-   - Update incoming call overlay to display both Caller Name (`title`) and Phone Number (`subtitle`).
-   - Update scrollable message viewport to bind the 256-byte message body.
-4. **Web Workbench & Simulator (`App.tsx`, `ancsSimulatorEngine.ts`)**:
-   - Sync simulated ANCS engine to generate 14-byte Control Point requests with Subtitle `0x02` and 256-byte Message `0x03`.
-   - Update simulator watch face to render Caller ID phone number and long message bodies.
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        OnePlus Watch 2R (466x466)                      │
+│                                                                        │
+│  ┌──────────────────────────────┐    ┌──────────────────────────────┐  │
+│  │     PAGE 1: MAIN CLOCK       │    │     PAGE 2: CONTROLS & DIAG  │  │
+│  │                              │    │                              │  │
+│  │       10:24 AM               │◄──►│  [ Advertise iPhone (A) ]    │  │
+│  │       Mon, Oct 26            │    │  [ Re-Sync ] [ Test Alert ]  │  │
+│  │                              │    │  Raw Attributes Inspector:   │  │
+│  │   📞 0 Missed Calls          │    │   Title: "John Appleseed"    │  │
+│  │   💬 3 Messages              │    │   Sub:   "+1 415 555-0199"   │  │
+│  │   [ Clear All ]              │    │   Msg:   "Hey, are you free?"│  │
+│  │                              │    │  Telemetry: Src/DS/HB/RSSI   │  │
+│  │           ●  ○               │    │           ○  ●               │  │
+│  └──────────────────────────────┘    └──────────────────────────────┘  │
+│                                 ▲                                      │
+│                                 │ (Overlay on incoming alert)          │
+│  ┌──────────────────────────────┴───────────────────────────────────┐  │
+│  │         FULL-SCREEN POPUP OVERLAY (Incoming Call / Message)      │  │
+│  │  Caller Name + Phone Number Subtitle + Full 256B Scrollable Body │  │
+│  │  [ Accept 0x00 ]                      [ Decline 0x01 ]           │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────┘
+                                  ▲
+                                  │ Intent extras / StateFlow
+┌─────────────────────────────────┴──────────────────────────────────────┐
+│            AncsBridgeService.kt (Wear OS Foreground Service)           │
+│  - Mode A Solicited ANCS Advertiser ("OP2R-Bridge", 7905F431-...)      │
+│  - 20-Second Keepalive RSSI Heartbeat                                  │
+│  - Continuous 5-Second Auto-Reconnect Loop                             │
+│  - Robust GATT Command Queue (4x Busy Retries)                         │
+└─────────────────────────────────▲──────────────────────────────────────┘
+                                  │
+┌─────────────────────────────────┴──────────────────────────────────────┐
+│            AncsPacketParser.kt (Binary Protocol Engine)                │
+│  - 12-Byte Control Point Command: [0x00, UID(4B), 0x01(64B),          │
+│                                    0x02(64B), 0x03(256B)]              │
+│  - Heuristic Contact vs Phone Number Classifier                        │
+│  - 350ms Data Source Idle Flush + Raw Attribute Telemetry              │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 4. Key Implementation Steps
+
+### Step 1: `AncsPacketParser.kt`
+- **Reorganize Control Point Command**: Structure `CommandIDGetNotificationAttributes` (0x00) with `NotificationUID (4B LE)` followed by `AttributeIDTitle (0x01, 64B)`, `AttributeIDSubtitle (0x02, 64B)`, and `AttributeIDMessage (0x03, 256B)` without leading unparameterized attributes that cause iOS 16/17/18 ANCS parsers to abort.
+- **Contact Name Heuristic Classifier**:
+  - If `rawTitle` contains letters and `rawSubtitle` contains phone digits/symbols (`+`, `-`, `()`, numbers), assign `rawTitle` as Caller Contact Name and `rawSubtitle` as Phone Number.
+  - If `rawTitle` is a phone number and `rawSubtitle` contains letters (or vice versa), swap them so the human name is always the prominent `title` and the phone number is `subtitle`.
+  - Store raw attribute values in `AssembledAncsNotification` for live diagnostic inspection.
+
+### Step 2: `AncsBridgeService.kt`
+- **Telemetry & Counters State**: Track unread `messageCount` and `missedCallCount` in `BridgeUiState`, with an action `ACTION_CLEAR_COUNTERS` to reset them.
+- **Raw Attribute Feed**: Pass raw `title`, `subtitle`, `message`, and `appId` into `BridgeUiState` so Page 2 can display them directly.
+- **Incoming Call Handling**: Increment `missedCallCount` when `CategoryID == 2` (Missed Call) or when an incoming call goes unanswered.
+
+### Step 3: `MainActivity.kt`
+- **Two-Page Horizontal ViewPager / Fling-Swipe Layout**:
+  - Implement a clean 2-page swipe container using `androidx.viewpager2.widget.ViewPager2` (or a custom 2-page horizontal swipe frame with smooth touch interpolation).
+  - **Page 1**: Minimal digital time (`10:24`), date, connection state dot, Missed Call counter pill, Message counter pill, safe `Clear All` button, and bottom page indicator dot `● ○`.
+  - **Page 2**: Mode A `Advertise iPhone (A)` button, `Re-Sync ANCS` button, `Test Alert` button, Raw Attribute Inspector, live BLE telemetry, and scrollable log feed with bottom page indicator dot `○ ●`.
+- **Accidental Click Prevention**: No connection or scanning buttons exist on Page 1. Mode B is completely removed.
+
+### Step 4: Web Simulator & Documentation (`/src/App.tsx`, `/src/utils/ancsSimulatorEngine.ts`)
+- Update the web watch face simulator to reflect the 2-page swipe interface (Page 1 Clock & Counters + Page 2 Controls), remove Mode B button, test the heuristic Contact Name vs Phone Number resolver, and verify compilation with `compile_applet`.

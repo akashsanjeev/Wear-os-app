@@ -86,8 +86,10 @@ export default function App() {
   const [nextUid, setNextUid] = useState<number>(1042);
   const [watchToastMessage, setWatchToastMessage] = useState<string | null>(null);
 
-  // Full-Screen Message Popup Card active UID on the watch face (null shows the circular-safe main menu)
+  // Full-Screen Message Popup Card active UID on the watch face (null shows the 2-page swipe watch UI)
   const [activeWatchPopupUid, setActiveWatchPopupUid] = useState<number | null>(null);
+  // 2-Page Horizontal Swipe state: 0 = Page 1 (Clock, Missed Calls, Messages, Clear), 1 = Page 2 (Mode A Controls & Raw Inspector)
+  const [watchPage, setWatchPage] = useState<0 | 1>(0);
 
   // Custom ANCS Notification state
   const [customBundleId, setCustomBundleId] = useState<string>('net.whatsapp.WhatsApp');
@@ -699,14 +701,13 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
             <div className="space-y-3 max-w-3xl">
               <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-emerald-400">
                 <CheckCircle2 className="w-4 h-4" />
-                <span>v3 Ready · Attribute 0x03 (256B Body) + Caller ID (Name &amp; Phone #) + Always-Alive BLE Heartbeat</span>
+                <span>v4 Ready · 2-Page Swipe Clock UI + Contact Name Caller ID + Full-Transaction 0x03 Lock</span>
               </div>
               <h1 className="text-2xl sm:text-3xl font-bold text-white font-display">
-                Sync &amp; Download Updated <code className="text-sky-300 font-mono">OP2R-iOS-Bridge-WearOS5.apk</code> (v3)
+                Sync &amp; Download Updated <code className="text-sky-300 font-mono">OP2R-iOS-Bridge-WearOS5.apk</code> (v4)
               </h1>
               <p className="text-sm text-slate-300 leading-relaxed">
-                This v3 build resolves generic message placeholders, missing Caller ID, and idle Bluetooth disconnects:
-                <code className="text-sky-300 font-mono"> AncsPacketParser.kt</code> now requests <strong>Attribute 0x01 (Title 64B)</strong>, <strong>Attribute 0x02 (Subtitle / Caller Phone # 64B)</strong>, and prioritizes <strong>Attribute 0x03 (Message Body 256B)</strong> with GATT BUSY retry protection + 350ms stream flush, while <code className="text-emerald-300 font-mono">AncsBridgeService.kt</code> runs an <strong>Apple Watch-style Always-Alive 20s RSSI Heartbeat + Continuous Solicited ANCS Auto-Reconnect Watchdog</strong>.
+                This v4 update redesigns your watch into a <strong>2-Page Horizontal Swipe UI</strong> (<strong>Page 1</strong>: Digital Clock, Missed Calls &amp; Messages counters, and a single <em>Clear Counts</em> button so you never accidentally press controls; <strong>Page 2</strong>: Mode A Advertise button only with Scan Beacon B removed, plus a live <strong>Raw ANCS Attribute Inspector</strong>), holds the GATT lock until <code className="text-sky-300 font-mono">Data Source</code> finishes so messages never fall back to generic UID text, and automatically re-queries iOS Contacts at <code className="text-emerald-300 font-mono">+550ms / +1250ms</code> to display the <strong>Caller Contact Name + Phone Number</strong>.
               </p>
 
               {/* Permanent 1-Click Direct Links for akashsanjeev/Wear-os-app */}
@@ -1039,126 +1040,149 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                     ) : null}
                   </AnimatePresence>
 
-                  {/* LAYER 1: SINGLE-SCREEN CIRCULAR-SAFE CONTROL DECK (54% -> 68% -> 82% -> 76% -> 64%) */}
-                  <div className="w-full h-full flex flex-col items-center justify-center text-center space-y-2">
-                    {/* Row 1: Top Arc Header + Live NS/DS Packet Counter (54% width) */}
-                    <div className="w-[54%] text-[11.5px] font-bold text-slate-100 font-display truncate">
-                      OP2R · NS:{watchAlerts.length} DS:{watchAlerts.length}
-                    </div>
-
-                    {/* Row 2: Upper Arc Interactive Status + Tap-to-ReSync Pill (68% width) */}
-                    <button
-                      onClick={() => {
-                        setWatchState('Bonded - Listening to ANCS');
-                        showWatchToast('Re-Synced ANCS CCCDs');
-                      }}
-                      title="Tap to Re-Sync ANCS Data Source & Notification Source CCCDs"
-                      className={`w-[68%] text-[9.5px] font-mono px-2.5 py-1 rounded-full border truncate transition-all cursor-pointer ${
-                        watchState.includes('Bonded')
-                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/35 hover:bg-emerald-500/20'
-                          : watchState.includes('Advertising') || watchState.includes('Scanning')
-                          ? 'bg-amber-500/10 text-amber-300 border-amber-500/35'
-                          : watchState.includes('133')
-                          ? 'bg-red-500/10 text-red-400 border-red-500/35'
-                          : 'bg-sky-500/10 text-sky-400 border-sky-500/35'
-                      }`}
-                    >
-                      {watchState.includes('Bonded') ? `${watchState} (Tap Re-Sync)` : watchState}
-                    </button>
-
-                    {/* Row 3: Equator 2-Column Primary Mode Pills (82% width — widest part of watchface) */}
-                    <div className="w-[82%] grid grid-cols-2 gap-2">
-                      <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.95 }}
-                        onClick={handleStartPeripheralMode}
-                        className="h-[52px] rounded-full bg-[#1B253D] hover:bg-[#232F4C] border border-sky-400/70 px-2.5 flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow"
-                      >
-                        <Bluetooth className="w-3.5 h-3.5 text-sky-300 shrink-0" />
-                        <div className="text-left min-w-0 leading-tight">
-                          <div className="text-[10.5px] font-semibold text-white truncate">
-                            Advertise
-                          </div>
-                          <div className="text-[9px] text-slate-300 truncate">
-                            iPhone (A)
-                          </div>
+                  {/* LAYER 1: 2-PAGE HORIZONTAL SWIPE WATCH UI (PAGE 1: CLOCK & COUNTERS | PAGE 2: MODE A CONTROLS & RAW INSPECTOR) */}
+                  <div className="w-full h-full flex flex-col items-center justify-between py-6 text-center">
+                    {watchPage === 0 ? (
+                      /* PAGE 1: GLANCEABLE DIGITAL CLOCK + MISSED CALLS + MESSAGES + CLEAR COUNTS */
+                      <div className="flex-1 w-full flex flex-col items-center justify-center space-y-2">
+                        <div className="w-[62%] text-[9.5px] font-mono text-emerald-400 truncate">
+                          ● {watchState.includes('Bonded') ? 'CONNECTED • iPhone' : watchState}
                         </div>
-                      </motion.button>
 
-                      <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.95 }}
-                        onClick={handleStartScannerMode}
-                        className="h-[52px] rounded-full bg-[#1B253D] hover:bg-[#232F4C] border border-emerald-400/70 px-2.5 flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow"
-                      >
-                        <Radio className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
-                        <div className="text-left min-w-0 leading-tight">
-                          <div className="text-[10.5px] font-semibold text-white truncate">
-                            Scan
-                          </div>
-                          <div className="text-[9px] text-slate-300 truncate">
-                            Beacon (B)
-                          </div>
+                        <div className="text-4xl font-bold text-white font-display tracking-tight tabular-nums leading-none">
+                          10:26
                         </div>
-                      </motion.button>
-                    </div>
+                        <div className="text-[11px] text-slate-400">
+                          Mon, Oct 26
+                        </div>
 
-                    {/* Row 4: Center Smart Pre-Existing Filter Toggle Pill (76% width) */}
-                    <motion.button
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.96 }}
-                      onClick={() => setIgnorePreExisting((prev) => !prev)}
-                      className="w-[76%] h-9 rounded-full bg-[#141C2E] hover:bg-[#1B253D] border border-slate-600/80 px-3.5 flex items-center justify-between transition-colors cursor-pointer"
-                    >
-                      <span className="text-[10px] font-medium text-slate-200 truncate">
-                        Pre-Existing: {ignorePreExisting ? 'Smart (2.5s)' : 'Show All'}
-                      </span>
-                      <div
-                        className={`w-7 h-4 rounded-full p-0.5 transition-colors flex items-center shrink-0 ${
-                          ignorePreExisting ? 'bg-sky-500 justify-end' : 'bg-slate-700 justify-start'
-                        }`}
-                      >
-                        <div className="w-3 h-3 rounded-full bg-white" />
+                        {/* Missed Calls & Messages Counter Badges */}
+                        <div className="w-[76%] grid grid-cols-2 gap-2 pt-1">
+                          <button
+                            onClick={() =>
+                              watchAlerts.length > 0 &&
+                              setActiveWatchPopupUid(watchAlerts[0].notificationUid)
+                            }
+                            className="py-1.5 px-2 rounded-xl bg-[#1F1218] border border-rose-800/80 text-[11px] font-bold text-rose-300 truncate cursor-pointer"
+                          >
+                            {watchAlerts.filter((a) => a.categoryId === 1 || a.categoryId === 2).length} Missed
+                          </button>
+
+                          <button
+                            onClick={() =>
+                              watchAlerts.length > 0 &&
+                              setActiveWatchPopupUid(watchAlerts[0].notificationUid)
+                            }
+                            className="py-1.5 px-2 rounded-xl bg-[#0F1B29] border border-sky-700/80 text-[11px] font-bold text-sky-300 truncate cursor-pointer"
+                          >
+                            {watchAlerts.filter((a) => a.categoryId !== 1 && a.categoryId !== 2).length} Msgs
+                          </button>
+                        </div>
+
+                        <div className="w-[74%] text-[9.5px] text-slate-400 truncate">
+                          {watchAlerts[0]
+                            ? `${watchAlerts[0].appDisplayName}: ${watchAlerts[0].title} — ${watchAlerts[0].message}`
+                            : 'No unread alerts'}
+                        </div>
+
+                        <motion.button
+                          whileHover={{ scale: 1.03 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={() => {
+                            setWatchAlerts([]);
+                            setActiveWatchPopupUid(null);
+                            showWatchToast('Cleared All Counts');
+                          }}
+                          className="w-[46%] h-7 rounded-lg bg-[#1E293B] hover:bg-[#273549] border border-slate-600 text-[10px] font-semibold text-white cursor-pointer"
+                        >
+                          Clear Counts
+                        </motion.button>
                       </div>
-                    </motion.button>
+                    ) : (
+                      /* PAGE 2: SWIPE SIDE -> MODE A ADVERTISE ONLY + RE-SYNC + TEST ALERT + RAW ANCS INSPECTOR */
+                      <div className="flex-1 w-full flex flex-col items-center justify-center space-y-1.5 px-8">
+                        <div className="text-[10px] font-mono font-bold text-sky-400">
+                          CONTROLS • MODE A
+                        </div>
+                        <div className="text-[9px] font-mono text-slate-400 truncate">
+                          Src:{watchAlerts.length} • 0x03:{watchAlerts.length} • HB:14 • -54dBm
+                        </div>
 
-                    {/* Row 5: Tapered Lower Arc 2-Column Utility Row (64% width — fits cleanly inside bottom arc) */}
-                    <div className="w-[64%] grid grid-cols-2 gap-2">
-                      <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.95 }}
-                        onClick={() =>
-                          fireAncsNotificationSequence({
-                            eventId: 0,
-                            eventFlags: 0x02,
-                            categoryId: 4,
-                            categoryCount: 1,
-                            appBundleId: 'net.whatsapp.WhatsApp',
-                            title: 'OP2R Hardware OK',
-                            message:
-                              'Screen wake, vibration, and full-screen popup are working on your OnePlus Watch 2R! Re-syncing iPhone ANCS link now...',
-                          })
-                        }
-                        className="h-8 rounded-full bg-[#132A24] hover:bg-[#193830] border border-emerald-400/70 px-2 flex items-center justify-center gap-1 transition-colors cursor-pointer"
-                      >
-                        <ShieldCheck className="w-3 h-3 text-emerald-400 shrink-0" />
-                        <span className="text-[9.5px] font-medium text-emerald-100 truncate">
-                          Test + Sync
-                        </span>
-                      </motion.button>
+                        {/* Single Dedicated Mode A Button (Scan Beacon B Removed) */}
+                        <motion.button
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.96 }}
+                          onClick={handleStartPeripheralMode}
+                          className="w-[82%] h-8 rounded-lg bg-sky-600 hover:bg-sky-500 border border-sky-400 text-[10.5px] font-semibold text-white flex items-center justify-center gap-1.5 cursor-pointer shadow"
+                        >
+                          <Bluetooth className="w-3.5 h-3.5 text-white shrink-0" />
+                          <span>Advertise iPhone (Mode A)</span>
+                        </motion.button>
 
-                      <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.95 }}
-                        onClick={handleResetBle}
-                        className="h-8 rounded-full bg-[#2A151C] hover:bg-red-950 border border-red-400/70 px-2 flex items-center justify-center gap-1 transition-colors cursor-pointer"
-                      >
-                        <Trash2 className="w-3 h-3 text-red-400 shrink-0" />
-                        <span className="text-[9.5px] font-medium text-red-100 truncate">
-                          Reset BLE
-                        </span>
-                      </motion.button>
-                    </div>
+                        {/* Re-Sync & Test Alert Row */}
+                        <div className="w-[82%] grid grid-cols-2 gap-1.5">
+                          <button
+                            onClick={() => {
+                              setWatchState('Bonded - Listening to ANCS');
+                              showWatchToast('Re-Synced ANCS');
+                            }}
+                            className="h-7 rounded-lg bg-teal-700 hover:bg-teal-600 border border-teal-400/60 text-[10px] font-semibold text-white cursor-pointer"
+                          >
+                            Re-Sync
+                          </button>
+
+                          <button
+                            onClick={() =>
+                              fireAncsNotificationSequence({
+                                eventId: 0,
+                                eventFlags: 0x02,
+                                categoryId: 4,
+                                categoryCount: 1,
+                                appBundleId: 'net.whatsapp.WhatsApp',
+                                title: 'Sarah Jenkins',
+                                subtitle: '+1 (415) 890-4321',
+                                message:
+                                  'Hey! Full 256-byte ANCS Attribute 0x03 message body + Contact Name resolved cleanly!',
+                              })
+                            }
+                            className="h-7 rounded-lg bg-indigo-600 hover:bg-indigo-500 border border-indigo-400/60 text-[10px] font-semibold text-white cursor-pointer"
+                          >
+                            Test Alert
+                          </button>
+                        </div>
+
+                        {/* Raw ANCS Attribute Inspector */}
+                        <div className="w-[82%] p-2 rounded-lg bg-[#111827] border border-slate-800 text-left text-[8.5px] font-mono text-slate-200 leading-tight space-y-0.5">
+                          <div className="text-sky-400 font-bold">RAW ANCS INSPECTOR</div>
+                          <div className="truncate">
+                            App(0x00): {watchAlerts[0]?.appBundleId || '—'}
+                          </div>
+                          <div className="truncate">
+                            Title(0x01): {watchAlerts[0]?.title || '—'}
+                          </div>
+                          <div className="truncate">
+                            Sub(0x02): {watchAlerts[0]?.subtitle || '—'}
+                          </div>
+                          <div className="truncate">
+                            Msg(0x03): {watchAlerts[0]?.message || '—'}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Bottom Page Indicator Dots (Tap to Toggle Page 1 Clock <-> Page 2 Controls) */}
+                    <button
+                      onClick={() => setWatchPage((prev) => (prev === 0 ? 1 : 0))}
+                      className="flex flex-col items-center gap-0.5 cursor-pointer group pt-1"
+                    >
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className={watchPage === 0 ? 'text-sky-400' : 'text-slate-600'}>●</span>
+                        <span className={watchPage === 1 ? 'text-sky-400' : 'text-slate-600'}>●</span>
+                      </div>
+                      <span className="text-[8.5px] font-mono text-slate-400 group-hover:text-sky-300">
+                        {watchPage === 0 ? 'Swipe / Tap for Controls →' : '← Swipe / Tap for Clock'}
+                      </span>
+                    </button>
                   </div>
                 </div>
               </div>

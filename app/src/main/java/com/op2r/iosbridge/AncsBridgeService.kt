@@ -20,11 +20,6 @@ import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
-import android.bluetooth.le.BluetoothLeScanner
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
-import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -64,14 +59,14 @@ import java.util.concurrent.ConcurrentLinkedQueue
  * Wear OS 5.0 (API 34) Foreground BLE ANCS Bridge Service for OnePlus Watch 2R (OPWWE234).
  *
  * Implements:
- * - Apple Watch-grade Always-Alive BLE Connection:
- *   1. Persistent Solicited ANCS Peripheral Advertising ("OP2R-Bridge" soliciting 7905F431-...)
- *      that stays active across disconnects so iOS CoreBluetooth automatically re-establishes the link.
- *   2. 20-second Keepalive Heartbeat (readRemoteRssi + CONNECTION_PRIORITY_BALANCED) to prevent
- *      Snapdragon W5 / BES2700 co-processor and iOS supervision timeout disconnects.
- *   3. Continuous 5-second Auto-Reconnect Watchdog loop using autoConnect=true and bonded device scanning.
- * - Reliable ANCS Data Source Attribute 0x03 (Message Body, 256B) & Caller ID (0x01 Title + 0x02 Subtitle)
- *   pipeline with Android 14 GATT BUSY retry protection and 350ms idle-stream flush.
+ * - Dedicated Mode A Solicited ANCS Peripheral Advertising ("OP2R-Bridge" soliciting 7905F431-...)
+ *   with 20-second Keepalive RSSI Heartbeat and 5-second Continuous Auto-Reconnect Watchdog.
+ * - Full-Transaction GATT Lock: Holds the GATT queue lock across the entire
+ *   Control Point (0x00) -> Data Source (22EA) multi-packet response so overlapping Notification
+ *   Source events never abort or corrupt the 256-byte Message Body (0x03) or Contact Name (0x01).
+ * - Automatic Incoming Call Contact Name Re-Query (+550ms / +1250ms) so if iOS initially sends
+ *   only the caller's phone number at t=0ms and resolves the Contact Name a moment later, the watch
+ *   automatically upgrades the call screen with the Contact Name + Phone Number.
  */
 @SuppressLint("MissingPermission")
 class AncsBridgeService : Service() {
@@ -86,11 +81,11 @@ class AncsBridgeService : Service() {
         val DATA_SOURCE_UUID: UUID = UUID.fromString("22EAC6E9-24D6-4BB5-BE44-B36ACE7C7BFB")
         val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-        // Service Intent Actions
+        // Service Intent Actions (Mode A Only — Mode B removed to prevent accidental presses)
         const val ACTION_START_MODE_A_PERIPHERAL = "com.op2r.iosbridge.action.START_MODE_A_PERIPHERAL"
-        const val ACTION_START_MODE_B_CENTRAL = "com.op2r.iosbridge.action.START_MODE_B_CENTRAL"
         const val ACTION_RESYNC_ANCS = "com.op2r.iosbridge.action.RESYNC_ANCS"
         const val ACTION_SIMULATE_TEST_ALERT = "com.op2r.iosbridge.action.SIMULATE_TEST_ALERT"
+        const val ACTION_CLEAR_COUNTERS = "com.op2r.iosbridge.action.CLEAR_COUNTERS"
         const val ACTION_PERFORM_POSITIVE = "com.op2r.iosbridge.action.PERFORM_POSITIVE"
         const val ACTION_PERFORM_NEGATIVE = "com.op2r.iosbridge.action.PERFORM_NEGATIVE"
         const val ACTION_STOP_BRIDGE = "com.op2r.iosbridge.action.STOP_BRIDGE"
@@ -100,6 +95,7 @@ class AncsBridgeService : Service() {
         const val EXTRA_NOTIFICATION_UID = "extra_notification_uid"
         const val EXTRA_CATEGORY_ID = "extra_category_id"
         const val EXTRA_APP_ID = "extra_app_id"
+        const val EXTRA_APP_NAME = "extra_app_name"
         const val EXTRA_TITLE = "extra_title"
         const val EXTRA_SUBTITLE = "extra_subtitle"
         const val EXTRA_MESSAGE = "extra_message"
@@ -120,30 +116,30 @@ class AncsBridgeService : Service() {
         // Keepalive & Reconnect intervals
         private const val KEEPALIVE_HEARTBEAT_INTERVAL_MS = 20_000L
         private const val AUTO_RECONNECT_INTERVAL_MS = 5_000L
-        private const val DATA_SOURCE_IDLE_FLUSH_MS = 350L
-        private const val ZERO_DATA_SOURCE_FALLBACK_MS = 1_800L
+        private const val DATA_SOURCE_IDLE_FLUSH_MS = 320L
+        private const val ZERO_DATA_SOURCE_FALLBACK_MS = 2_400L
 
         private val _bridgeState = MutableStateFlow(BridgeUiState())
         val bridgeState: StateFlow<BridgeUiState> = _bridgeState.asStateFlow()
     }
 
-    enum class DiscoveryMode {
-        MODE_A_PERIPHERAL_SOLICITATION,
-        MODE_B_CENTRAL_SCANNER
-    }
-
     data class BridgeUiState(
         val statusText: String = "IDLE",
-        val discoveryMode: DiscoveryMode = DiscoveryMode.MODE_A_PERIPHERAL_SOLICITATION,
         val connectedDeviceName: String? = null,
         val connectedDeviceAddress: String? = null,
         val isBonded: Boolean = false,
         val isAncsSubscribed: Boolean = false,
         val negotiatedMtu: Int = 23,
+        val missedCallCount: Int = 0,
+        val unreadMessageCount: Int = 0,
         val rxSourcePackets: Int = 0,
         val rxDataPackets: Int = 0,
         val keepAlivePings: Int = 0,
         val lastRssi: Int = 0,
+        val lastRawAppId: String = "—",
+        val lastRawTitle: String = "—",
+        val lastRawSubtitle: String = "—",
+        val lastRawMessage: String = "—",
         val lastNotification: AncsPacketParser.AssembledAncsNotification? = null,
         val diagnosticLog: List<String> = emptyList()
     )
@@ -154,15 +150,6 @@ class AncsBridgeService : Service() {
 
         data class EnableNotificationWithCccd(
             val characteristic: BluetoothGattCharacteristic,
-            val label: String,
-            override val retryCount: Int = 0
-        ) : GattOperation() {
-            override fun withIncrementedRetry() = copy(retryCount = retryCount + 1)
-        }
-
-        data class WriteCccdDescriptor(
-            val descriptor: BluetoothGattDescriptor,
-            val value: ByteArray,
             val label: String,
             override val retryCount: Int = 0
         ) : GattOperation() {
@@ -195,7 +182,6 @@ class AncsBridgeService : Service() {
     private lateinit var bluetoothManager: BluetoothManager
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bleAdvertiser: BluetoothLeAdvertiser? = null
-    private var bleScanner: BluetoothLeScanner? = null
     private var gattServer: BluetoothGattServer? = null
     private var activeGatt: BluetoothGatt? = null
     private var targetIosDevice: BluetoothDevice? = null
@@ -204,7 +190,7 @@ class AncsBridgeService : Service() {
     private var controlPointCharacteristic: BluetoothGattCharacteristic? = null
     private var dataSourceCharacteristic: BluetoothGattCharacteristic? = null
 
-    // Thread-safe Sequential GATT Operation Queue with single-flight lock & timeout watchdog
+    // Sequential GATT Operation Queue with full Data-Source transaction locking
     private val gattQueue = ConcurrentLinkedQueue<GattOperation>()
     private val gattQueueLock = Any()
     @Volatile
@@ -213,17 +199,18 @@ class AncsBridgeService : Service() {
     private var gattWatchdogRunnable: Runnable? = null
 
     private var isAdvertisingModeA = false
-    private var isScanningModeB = false
     private var userStoppedBridge = false
 
-    // Tracks whether any Data Source chunk arrived for the active NotificationUID
+    // Tracks UIDs that have received Data Source chunks or completed real assembly
     private val dataSourceReceivedForUid = ConcurrentHashMap<Int, Boolean>()
-    // Tracks pending fallback runnables per NotificationUID
+    private val realDataAssembledForUid = ConcurrentHashMap<Int, Boolean>()
+    private val countedMessageUids = ConcurrentHashMap<Int, Boolean>()
+    private val countedMissedCallUids = ConcurrentHashMap<Int, Boolean>()
+    private val activeIncomingCallUids = ConcurrentHashMap<Int, Boolean>()
+    private val callContactRequeryCount = ConcurrentHashMap<Int, Int>()
     private val pendingFallbackRunnables = ConcurrentHashMap<Int, Runnable>()
-    // Idle-stream flush runnable that flushes partial Data Source attributes 350ms after the last chunk
-    private var dataSourceIdleFlushRunnable: Runnable? = null
 
-    // Ignore pre-existing notification bursts unless it's an active Incoming Call
+    private var dataSourceIdleFlushRunnable: Runnable? = null
     private var ignorePreExistingAlerts = true
 
     // Always-Alive BLE Coroutine Jobs
@@ -232,7 +219,7 @@ class AncsBridgeService : Service() {
 
     private val ancsPacketParser = AncsPacketParser { assembledNotification ->
         mainHandler.post {
-            onAncsNotificationReady(assembledNotification)
+            onAncsNotificationReady(assembledNotification, isFromRealDataSource = true)
         }
     }
 
@@ -243,9 +230,7 @@ class AncsBridgeService : Service() {
         createNotificationChannels()
         registerBondStateReceiver()
         startBridgeForegroundNotification("OP2R ANCS Bridge Always-On")
-        appendLog("Service created on API ${Build.VERSION.SDK_INT}")
-
-        // Start the continuous Apple Watch-style auto-reconnect & solicitation watchdog
+        appendLog("Service ready (Mode A Always-On)")
         startContinuousAutoReconnectWatchdog()
     }
 
@@ -255,19 +240,19 @@ class AncsBridgeService : Service() {
                 userStoppedBridge = false
                 startModeAPeripheralAdvertising()
             }
-            ACTION_START_MODE_B_CENTRAL -> {
-                userStoppedBridge = false
-                startModeBCentralScanning()
-            }
             ACTION_RESYNC_ANCS -> {
                 resyncAncsSubscriptions()
             }
             ACTION_SIMULATE_TEST_ALERT -> {
                 triggerSimulatedTestAlert()
             }
+            ACTION_CLEAR_COUNTERS -> {
+                clearAllCountersAndNotifications()
+            }
             ACTION_PERFORM_POSITIVE -> {
                 val uid = intent.getIntExtra(EXTRA_NOTIFICATION_UID, -1)
                 if (uid != -1) {
+                    activeIncomingCallUids.remove(uid)
                     enqueueNotificationAction(uid, positive = true)
                     cancelWatchNotificationForUid(uid)
                 }
@@ -275,6 +260,7 @@ class AncsBridgeService : Service() {
             ACTION_PERFORM_NEGATIVE -> {
                 val uid = intent.getIntExtra(EXTRA_NOTIFICATION_UID, -1)
                 if (uid != -1) {
+                    activeIncomingCallUids.remove(uid)
                     enqueueNotificationAction(uid, positive = false)
                     cancelWatchNotificationForUid(uid)
                 }
@@ -287,7 +273,7 @@ class AncsBridgeService : Service() {
             }
             else -> {
                 userStoppedBridge = false
-                if (!isAdvertisingModeA && !isScanningModeB && activeGatt == null) {
+                if (!isAdvertisingModeA && activeGatt == null) {
                     startModeAPeripheralAdvertising()
                 }
             }
@@ -304,16 +290,30 @@ class AncsBridgeService : Service() {
         super.onDestroy()
     }
 
+    private fun clearAllCountersAndNotifications() {
+        countedMessageUids.clear()
+        countedMissedCallUids.clear()
+        _bridgeState.value = _bridgeState.value.copy(
+            missedCallCount = 0,
+            unreadMessageCount = 0,
+            lastNotification = null
+        )
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            // Cancel all call & message notifications while keeping the foreground service notification
+            nm.activeNotifications.forEach { statusBarNotif ->
+                if (statusBarNotif.id != FOREGROUND_NOTIFICATION_ID) {
+                    nm.cancel(statusBarNotif.id)
+                }
+            }
+        } catch (_: Exception) {}
+        appendLog("Cleared all missed call & message counters")
+    }
+
     // =========================================================================
     // APPLE WATCH-GRADE ALWAYS-ALIVE BLE ENGINE (HEARTBEAT + AUTO-RECONNECT)
     // =========================================================================
 
-    /**
-     * Runs a continuous 20-second keepalive heartbeat while connected to iPhone.
-     * - Requests BluetoothGatt.CONNECTION_PRIORITY_BALANCED so neither iOS nor the
-     *   OnePlus Watch 2R BES2700 co-processor drops the supervision link during idle periods.
-     * - Calls gatt.readRemoteRssi() every 20s to generate lightweight link-layer traffic.
-     */
     private fun startKeepAliveHeartbeat(gatt: BluetoothGatt) {
         keepAliveHeartbeatJob?.cancel()
         try {
@@ -332,8 +332,6 @@ class AncsBridgeService : Service() {
                         _bridgeState.value = _bridgeState.value.copy(
                             keepAlivePings = _bridgeState.value.keepAlivePings + 1
                         )
-                    } else {
-                        appendLog("Keepalive RSSI ping returned false; verifying link")
                     }
                 } catch (e: Exception) {
                     appendLog("Keepalive error: ${e.message}")
@@ -347,13 +345,6 @@ class AncsBridgeService : Service() {
         keepAliveHeartbeatJob = null
     }
 
-    /**
-     * Runs continuously in the background like an Apple Watch companion daemon:
-     * Whenever the watch is not actively subscribed to ANCS (and the user hasn't stopped the bridge):
-     * 1. Ensures Mode A Solicited ANCS Peripheral Advertising ("OP2R-Bridge") is running so iOS
-     *    CoreBluetooth immediately spots the watch and reconnects automatically.
-     * 2. Attempts background autoConnect GATT connection to the last known or bonded iPhone.
-     */
     private fun startContinuousAutoReconnectWatchdog() {
         continuousReconnectJob?.cancel()
         continuousReconnectJob = serviceScope.launch {
@@ -361,27 +352,18 @@ class AncsBridgeService : Service() {
                 delay(AUTO_RECONNECT_INTERVAL_MS)
                 if (userStoppedBridge) continue
 
-                val isSubscribed = _bridgeState.value.isAncsSubscribed
-                if (isSubscribed && activeGatt != null) {
-                    // Already connected and subscribed — keep Solicited Advertising alive in background
-                    // in case iOS cycles its link, and let the 20s heartbeat maintain supervision.
+                if (_bridgeState.value.isAncsSubscribed && activeGatt != null) {
                     continue
                 }
 
-                // Ensure Mode A Solicited ANCS Advertising is active so iOS auto-connects on sight
-                if (!isAdvertisingModeA &&
-                    _bridgeState.value.discoveryMode == DiscoveryMode.MODE_A_PERIPHERAL_SOLICITATION
-                ) {
-                    appendLog("Always-On Watchdog: Restarting ANCS Solicited Advertising")
+                if (!isAdvertisingModeA) {
                     startModeAPeripheralAdvertising()
                 }
 
-                // If we aren't currently mid-connection, initiate autoConnect to target or bonded iPhone
                 if (activeGatt == null) {
                     val candidateDevice = targetIosDevice ?: findBondedIphoneDevice()
                     if (candidateDevice != null) {
                         targetIosDevice = candidateDevice
-                        appendLog("Always-On Watchdog: Auto-connecting to ${candidateDevice.address}")
                         connectOrInitializeAncsGattClient(candidateDevice, useAutoConnect = true)
                     }
                 }
@@ -402,11 +384,10 @@ class AncsBridgeService : Service() {
     // =========================================================================
 
     private fun startModeAPeripheralAdvertising() {
-        stopModeBCentralScanning()
         val adapter = bluetoothAdapter
         if (adapter == null || !adapter.isEnabled) {
-            updateStatus("BLUETOOTH OFF", DiscoveryMode.MODE_A_PERIPHERAL_SOLICITATION)
-            appendLog("Bluetooth adapter disabled or unavailable")
+            updateStatus("BLUETOOTH OFF")
+            appendLog("Bluetooth adapter disabled")
             return
         }
 
@@ -418,26 +399,30 @@ class AncsBridgeService : Service() {
 
         ensureGattServerStarted()
 
-        if (isAdvertisingModeA) {
-            // Already advertising Mode A
-            return
+        // Also check if we already have a bonded iPhone to connect to immediately
+        if (activeGatt == null) {
+            val bondedIphone = findBondedIphoneDevice()
+            if (bondedIphone != null) {
+                targetIosDevice = bondedIphone
+                connectOrInitializeAncsGattClient(bondedIphone, useAutoConnect = true)
+            }
         }
+
+        if (isAdvertisingModeA) return
 
         bleAdvertiser = adapter.bluetoothLeAdvertiser
         if (bleAdvertiser == null) {
-            appendLog("BLE Advertiser unsupported; switching to Mode B Central Scanner")
-            startModeBCentralScanning()
+            appendLog("BLE Advertiser unavailable on this device")
             return
         }
 
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setConnectable(true)
-            .setTimeout(0) // Never time out advertising so watch stays discoverable/reconnectable
+            .setTimeout(0)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
             .build()
 
-        // Primary advertisement packet: Flags + Solicited ANCS 128-bit UUID (fits strictly <= 31B)
         val advertiseDataBuilder = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .setIncludeTxPowerLevel(false)
@@ -449,7 +434,6 @@ class AncsBridgeService : Service() {
         }
         val advertiseData = advertiseDataBuilder.build()
 
-        // Scan response packet: carries the "OP2R-Bridge" device name for iOS Settings -> Bluetooth
         val scanResponse = AdvertiseData.Builder()
             .setIncludeDeviceName(true)
             .build()
@@ -458,12 +442,12 @@ class AncsBridgeService : Service() {
             bleAdvertiser?.startAdvertising(settings, advertiseData, scanResponse, modeAAdvertiseCallback)
             isAdvertisingModeA = true
             if (!_bridgeState.value.isAncsSubscribed) {
-                updateStatus("ADVERTISING ANCS SOLICITATION", DiscoveryMode.MODE_A_PERIPHERAL_SOLICITATION)
+                updateStatus("ADVERTISING (MODE A)")
                 startBridgeForegroundNotification("Advertising OP2R-Bridge to iPhone...")
             }
-            appendLog("Mode A started: Soliciting ANCS UUID $ANCS_SERVICE_UUID")
+            appendLog("Mode A Solicited ANCS Advertising active")
         } catch (e: Exception) {
-            appendLog("Mode A startAdvertising exception: ${e.message}")
+            appendLog("Mode A startAdvertising error: ${e.message}")
         }
     }
 
@@ -471,8 +455,7 @@ class AncsBridgeService : Service() {
         if (!isAdvertisingModeA) return
         try {
             bleAdvertiser?.stopAdvertising(modeAAdvertiseCallback)
-        } catch (e: Exception) {
-            Log.w(TAG, "stopAdvertising failed: ${e.message}")
+        } catch (_: Exception) {
         } finally {
             isAdvertisingModeA = false
         }
@@ -480,7 +463,7 @@ class AncsBridgeService : Service() {
 
     private val modeAAdvertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-            appendLog("Mode A advertisement active (LOW_LATENCY, Connectable)")
+            appendLog("Mode A advertisement active")
         }
 
         override fun onStartFailure(errorCode: Int) {
@@ -501,99 +484,17 @@ class AncsBridgeService : Service() {
     private val gattServerCallback = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                appendLog("GATT Server: iOS Central connected (${device.address})")
+                appendLog("GATT Server: iPhone connected (${device.address})")
                 targetIosDevice = device
                 mainHandler.post {
                     connectOrInitializeAncsGattClient(device, useAutoConnect = false)
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                appendLog("GATT Server: Central disconnected (${device.address})")
                 mainHandler.post {
                     if (!userStoppedBridge) {
                         startModeAPeripheralAdvertising()
                     }
                 }
-            }
-        }
-    }
-
-    // =========================================================================
-    // MODE B: CENTRAL SCANNER FALLBACK + BONDED DEVICE CONNECTOR
-    // =========================================================================
-
-    private fun startModeBCentralScanning() {
-        stopModeAPeripheralAdvertising()
-        val adapter = bluetoothAdapter
-        if (adapter == null || !adapter.isEnabled) {
-            updateStatus("BLUETOOTH OFF", DiscoveryMode.MODE_B_CENTRAL_SCANNER)
-            return
-        }
-
-        val bondedDevices = adapter.bondedDevices.orEmpty()
-        val bondedIphone = findBondedIphoneDevice()
-        if (bondedIphone != null) {
-            appendLog("Found bonded iOS device: ${bondedIphone.name ?: bondedIphone.address}")
-            targetIosDevice = bondedIphone
-            connectOrInitializeAncsGattClient(bondedIphone, useAutoConnect = false)
-        } else if (bondedDevices.isEmpty()) {
-            appendLog("No bonded iPhone found yet — starting BLE scanner")
-        }
-
-        bleScanner = adapter.bluetoothLeScanner
-        val scanSettings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .build()
-
-        val filters = listOf(
-            ScanFilter.Builder()
-                .setServiceSolicitationUuid(ParcelUuid(ANCS_SERVICE_UUID))
-                .build(),
-            ScanFilter.Builder()
-                .setServiceUuid(ParcelUuid(ANCS_SERVICE_UUID))
-                .build()
-        )
-
-        try {
-            bleScanner?.startScan(filters, scanSettings, modeBScanCallback)
-            isScanningModeB = true
-            updateStatus("SCANNING FOR IPHONE (MODE B)", DiscoveryMode.MODE_B_CENTRAL_SCANNER)
-            startBridgeForegroundNotification("Scanning for iPhone ANCS...")
-            appendLog("Mode B BLE scanner started")
-        } catch (e: Exception) {
-            try {
-                bleScanner?.startScan(modeBScanCallback)
-                isScanningModeB = true
-                appendLog("Mode B unfiltered BLE scan active")
-            } catch (ex: Exception) {
-                appendLog("Mode B scan failure: ${ex.message}")
-            }
-        }
-    }
-
-    private fun stopModeBCentralScanning() {
-        if (!isScanningModeB) return
-        try {
-            bleScanner?.stopScan(modeBScanCallback)
-        } catch (e: Exception) {
-            Log.w(TAG, "stopScan error: ${e.message}")
-        } finally {
-            isScanningModeB = false
-        }
-    }
-
-    private val modeBScanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val device = result.device ?: return
-            val name = device.name ?: result.scanRecord?.deviceName ?: ""
-            val isLikelyIos = name.contains("iPhone", ignoreCase = true) ||
-                device.bondState == BluetoothDevice.BOND_BONDED ||
-                result.scanRecord?.manufacturerSpecificData?.get(0x004C) != null
-
-            if (isLikelyIos && activeGatt == null) {
-                appendLog("Mode B discovered iOS candidate: ${name.ifBlank { device.address }}")
-                stopModeBCentralScanning()
-                targetIosDevice = device
-                connectOrInitializeAncsGattClient(device, useAutoConnect = false)
             }
         }
     }
@@ -607,7 +508,6 @@ class AncsBridgeService : Service() {
         useAutoConnect: Boolean = false
     ) {
         if (activeGatt != null && _bridgeState.value.connectedDeviceAddress == device.address) {
-            appendLog("Refreshing services on existing GATT for ${device.address}")
             activeGatt?.discoverServices()
             return
         }
@@ -615,16 +515,13 @@ class AncsBridgeService : Service() {
         closeActiveGatt()
         val bonded = device.bondState == BluetoothDevice.BOND_BONDED
         _bridgeState.value = _bridgeState.value.copy(
-            statusText = if (useAutoConnect) "AUTO-RECONNECTING..." else "CONNECTING GATT...",
+            statusText = if (useAutoConnect) "AUTO-CONNECTING..." else "CONNECTING...",
             connectedDeviceName = device.name ?: "iPhone",
             connectedDeviceAddress = device.address,
             isBonded = bonded,
             isAncsSubscribed = false
         )
 
-        appendLog(
-            "Opening GATT client to ${device.address} (bond=${device.bondState}, autoConnect=$useAutoConnect)"
-        )
         activeGatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             device.connectGatt(this, useAutoConnect, gattClientCallback, BluetoothDevice.TRANSPORT_LE)
         } else {
@@ -632,13 +529,10 @@ class AncsBridgeService : Service() {
         }
     }
 
-    /**
-     * Re-discovers and re-subscribes to ANCS Data Source + Notification Source on the active link.
-     */
     private fun resyncAncsSubscriptions() {
         val gatt = activeGatt
-        val device = targetIosDevice
-        appendLog("Re-syncing ANCS GATT subscriptions...")
+        val device = targetIosDevice ?: findBondedIphoneDevice()
+        appendLog("Re-syncing ANCS subscriptions...")
         clearGattQueue()
         ancsPacketParser.resetParser()
         ignorePreExistingAlerts = true
@@ -656,11 +550,11 @@ class AncsBridgeService : Service() {
 
     /**
      * Injects a realistic multi-packet ANCS Notification Source + 256-byte Data Source burst
-     * through the exact binary parser and full-screen popup pipeline to verify watch UI + vibration.
+     * to test the watch popup, Contact Name + Phone Number resolution, and counters.
      */
     private fun triggerSimulatedTestAlert() {
-        appendLog("Injecting local ANCS test alert (UID #9999)...")
-        val testUid = 9999
+        val testUid = (9000..9999).random()
+        appendLog("Injecting test ANCS alert (UID #$testUid)...")
 
         val sourcePacket = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
             .put(AncsPacketParser.EVENT_ID_NOTIFICATION_ADDED.toByte())
@@ -680,8 +574,8 @@ class AncsBridgeService : Service() {
         val titleBytes = "Sarah Jenkins".toByteArray(StandardCharsets.UTF_8)
         val subtitleBytes = "+1 (415) 890-4321".toByteArray(StandardCharsets.UTF_8)
         val messageBytes = (
-            "Hey! This is a full 256-byte ANCS Attribute 0x03 payload reassembled across BLE MTU " +
-                "fragments on your OnePlus Watch 2R. Caller ID subtitle and full scrollable body are active!"
+            "Hey! This is a full 256-byte ANCS Attribute 0x03 message body reassembled across BLE " +
+                "MTU chunks on your OnePlus Watch 2R. Contact Name and App Name are resolved cleanly!"
             ).toByteArray(StandardCharsets.UTF_8)
 
         val payload = ByteBuffer.allocate(
@@ -703,7 +597,6 @@ class AncsBridgeService : Service() {
             .put(messageBytes)
             .array()
 
-        // Feed in 64-byte chunks to exercise multi-packet Data Source fragmentation reassembly
         var offset = 0
         while (offset < payload.size) {
             val end = minOf(offset + 64, payload.size)
@@ -718,9 +611,9 @@ class AncsBridgeService : Service() {
             val device = gatt.device
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 val bonded = device.bondState == BluetoothDevice.BOND_BONDED
-                appendLog("GATT Client CONNECTED to ${device.address} (bonded=$bonded)")
+                appendLog("Connected to ${device.address} (bonded=$bonded)")
                 _bridgeState.value = _bridgeState.value.copy(
-                    statusText = if (bonded) "CONNECTED (BONDED)" else "PAIRING / BONDING...",
+                    statusText = if (bonded) "CONNECTED" else "BONDING...",
                     connectedDeviceName = device.name ?: "iPhone",
                     connectedDeviceAddress = device.address,
                     isBonded = bonded
@@ -728,7 +621,6 @@ class AncsBridgeService : Service() {
                 startBridgeForegroundNotification("Connected to ${device.name ?: "iPhone"}")
                 startKeepAliveHeartbeat(gatt)
 
-                // Request MTU 247 first; discoverServices() runs in onMtuChanged (or fallback after 600ms)
                 mainHandler.postDelayed({
                     val requested = gatt.requestMtu(PREFERRED_ANCS_MTU)
                     if (!requested) {
@@ -737,24 +629,21 @@ class AncsBridgeService : Service() {
                 }, 250L)
 
                 if (!bonded) {
-                    appendLog("Initiating SMP bond (createBond) for ANCS encryption")
                     device.createBond()
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                appendLog("GATT Client DISCONNECTED (status=$status) — Auto-Reconnect engaged")
+                appendLog("Disconnected (status=$status) — Auto-Reconnecting")
                 stopKeepAliveHeartbeat()
                 clearGattQueue()
                 ancsPacketParser.resetParser()
                 _bridgeState.value = _bridgeState.value.copy(
-                    statusText = "RECONNECTING TO IPHONE...",
+                    statusText = "RECONNECTING...",
                     isAncsSubscribed = false
                 )
                 startBridgeForegroundNotification("Reconnecting to iPhone...")
                 closeActiveGatt()
 
                 if (!userStoppedBridge) {
-                    // Restart Mode A Solicited ANCS Advertising immediately so iOS reconnects on sight,
-                    // AND open an autoConnect=true GATT client so Android's BLE controller also reconnects.
                     mainHandler.post {
                         startModeAPeripheralAdvertising()
                         connectOrInitializeAncsGattClient(device, useAutoConnect = true)
@@ -770,26 +659,26 @@ class AncsBridgeService : Service() {
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-            appendLog("Negotiated BLE MTU = $mtu (status=$status)")
+            appendLog("MTU = $mtu")
             _bridgeState.value = _bridgeState.value.copy(negotiatedMtu = mtu)
             gatt.discoverServices()
         }
 
         override fun onServicesChanged(gatt: BluetoothGatt) {
-            appendLog("GATT onServicesChanged triggered by iOS — re-discovering ANCS")
+            appendLog("GATT services changed — re-subscribing ANCS")
             clearGattQueue()
             gatt.discoverServices()
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                appendLog("onServicesDiscovered failed: status=$status")
+                appendLog("discoverServices failed ($status)")
                 return
             }
 
             val ancsService = gatt.getService(ANCS_SERVICE_UUID)
             if (ancsService == null) {
-                appendLog("ANCS Service not visible yet — awaiting bond / encrypted link")
+                appendLog("ANCS not visible yet — awaiting bond")
                 if (gatt.device.bondState != BluetoothDevice.BOND_BONDED) {
                     gatt.device.createBond()
                 } else {
@@ -806,11 +695,11 @@ class AncsBridgeService : Service() {
                 controlPointCharacteristic == null ||
                 dataSourceCharacteristic == null
             ) {
-                appendLog("ANCS characteristics incomplete on service")
+                appendLog("ANCS characteristics missing")
                 return
             }
 
-            appendLog("ANCS discovered! Subscribing Data Source (1st) -> Notification Source (2nd)")
+            appendLog("Subscribing Data Source (1st) -> Notification Source (2nd)")
             enqueueAncsSubscriptionSequence()
         }
 
@@ -824,32 +713,29 @@ class AncsBridgeService : Service() {
                 status == BluetoothGatt.GATT_INSUFFICIENT_ENCRYPTION ||
                 status == 137
             ) {
-                appendLog("CCCD write requires encryption (status=$status) — bonding with iPhone")
+                appendLog("CCCD requires encryption — bonding")
                 completeCurrentGattOperation()
                 gatt.device.createBond()
                 return
             }
 
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                appendLog("CCCD 0x2902 enabled for ${shortUuid(charUuid)}")
                 if (charUuid == NOTIFICATION_SOURCE_UUID) {
                     ignorePreExistingAlerts = true
-                    // Ignore iOS's initial dump of old Notification Center items for 3 seconds,
-                    // then allow live notifications and any modified alerts through.
                     mainHandler.postDelayed({
                         ignorePreExistingAlerts = false
                     }, 3000L)
 
                     _bridgeState.value = _bridgeState.value.copy(
-                        statusText = "BONDED • ALWAYS-ON ANCS",
+                        statusText = "CONNECTED • ALWAYS-ON",
                         isBonded = true,
                         isAncsSubscribed = true
                     )
                     startBridgeForegroundNotification("Connected to iPhone • Always-On ANCS")
-                    appendLog("ANCS Live! Ready for Caller ID & 256B Message Body")
+                    appendLog("ANCS Active! Ready for Calls & Messages")
                 }
             } else {
-                appendLog("CCCD write failed for ${shortUuid(charUuid)} (status=$status)")
+                appendLog("CCCD write error ($status)")
             }
 
             completeCurrentGattOperation()
@@ -861,14 +747,25 @@ class AncsBridgeService : Service() {
             status: Int
         ) {
             if (characteristic.uuid == CONTROL_POINT_UUID) {
-                if (status != BluetoothGatt.GATT_SUCCESS) {
-                    appendLog("Control Point write status=$status")
+                val activeOp = synchronized(gattQueueLock) { activeInFlightOperation }
+                if (activeOp is GattOperation.RequestNotificationAttributes) {
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        // CRITICAL ANCS RULE: Do NOT release the GATT queue lock yet!
+                        // Wait until Data Source finishes delivering the attributes for this UID
+                        // (or 900ms max) so a subsequent Control Point command never aborts Data Source!
+                        scheduleGattWatchdog(
+                            label = "AwaitDataSource UID=${activeOp.notificationUid}",
+                            timeoutMs = 900L
+                        )
+                        return
+                    } else {
+                        appendLog("Control Point GetAttrs write failed (status=$status)")
+                    }
                 }
             }
             completeCurrentGattOperation()
         }
 
-        // Android 13 / 14 (API 33 / 34 - Wear OS 5.0) callback signature
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
@@ -877,7 +774,6 @@ class AncsBridgeService : Service() {
             handleAncsCharacteristicPayload(characteristic.uuid, value)
         }
 
-        // Backward-compatible callback for older Android runtimes
         @Deprecated("Deprecated in API 33")
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
@@ -891,7 +787,7 @@ class AncsBridgeService : Service() {
     }
 
     // =========================================================================
-    // SEQUENTIAL GATT QUEUE ENGINE WITH ANDROID 14 BUSY RETRY PROTECTION
+    // SEQUENTIAL GATT QUEUE ENGINE WITH FULL DATA-SOURCE TRANSACTION LOCK
     // =========================================================================
 
     private fun enqueueAncsSubscriptionSequence() {
@@ -899,7 +795,6 @@ class AncsBridgeService : Service() {
         val notifSource = notificationSourceCharacteristic ?: return
 
         clearGattQueue()
-        // Strictly subscribe to Data Source FIRST, then Notification Source SECOND
         enqueueGattOperation(
             GattOperation.EnableNotificationWithCccd(
                 characteristic = dataSource,
@@ -914,8 +809,16 @@ class AncsBridgeService : Service() {
         )
     }
 
-    private fun enqueueNotificationAttributesRequest(notificationUid: Int) {
+    private fun enqueueNotificationAttributesRequest(notificationUid: Int, forceRequery: Boolean = false) {
         val controlPoint = controlPointCharacteristic ?: return
+        synchronized(gattQueueLock) {
+            // Avoid stacking duplicate GetNotificationAttributes requests for the same UID
+            val alreadyQueued = gattQueue.any {
+                it is GattOperation.RequestNotificationAttributes && it.notificationUid == notificationUid
+            }
+            if (alreadyQueued && !forceRequery) return
+        }
+
         val cmd = ancsPacketParser.buildGetNotificationAttributesCommand(notificationUid)
         enqueueGattOperation(
             GattOperation.RequestNotificationAttributes(
@@ -929,7 +832,6 @@ class AncsBridgeService : Service() {
     fun enqueueNotificationAction(notificationUid: Int, positive: Boolean) {
         val controlPoint = controlPointCharacteristic ?: return
         val cmd = ancsPacketParser.buildPerformNotificationActionCommand(notificationUid, positive)
-        appendLog("Queueing Control Point Action (uid=$notificationUid, positive=$positive)")
         enqueueGattOperation(
             GattOperation.PerformNotificationAction(
                 controlPoint = controlPoint,
@@ -953,8 +855,7 @@ class AncsBridgeService : Service() {
             isGattOperationInFlight = false
             activeInFlightOperation = null
         }
-        // Post to main looper with a tiny 15ms breather so Android's internal mDeviceBusy flag clears
-        mainHandler.postDelayed({ processNextGattOperation() }, 15L)
+        mainHandler.postDelayed({ processNextGattOperation() }, 20L)
     }
 
     private fun clearGattQueue() {
@@ -966,9 +867,13 @@ class AncsBridgeService : Service() {
         }
     }
 
-    private fun scheduleGattWatchdog(label: String) {
+    private fun scheduleGattWatchdog(label: String, timeoutMs: Long = 2200L) {
         cancelGattWatchdog()
         val runnable = Runnable {
+            // Before releasing the lock, flush any partial Data Source attributes in the parser
+            if (ancsPacketParser.hasPendingAssembly()) {
+                ancsPacketParser.flushPendingPartialAttributes()
+            }
             val shouldRelease = synchronized(gattQueueLock) {
                 if (isGattOperationInFlight) {
                     isGattOperationInFlight = false
@@ -979,12 +884,11 @@ class AncsBridgeService : Service() {
                 }
             }
             if (shouldRelease) {
-                appendLog("GATT watchdog released lock ($label)")
                 processNextGattOperation()
             }
         }
         gattWatchdogRunnable = runnable
-        mainHandler.postDelayed(runnable, 2500L)
+        mainHandler.postDelayed(runnable, timeoutMs)
     }
 
     private fun cancelGattWatchdog() {
@@ -1007,7 +911,6 @@ class AncsBridgeService : Service() {
                 val localOk = gatt.setCharacteristicNotification(nextOp.characteristic, true)
                 val cccd = nextOp.characteristic.getDescriptor(CCCD_UUID)
                 if (!localOk || cccd == null) {
-                    appendLog("Failed local setCharacteristicNotification for ${nextOp.label}")
                     completeCurrentGattOperation()
                     return
                 }
@@ -1019,14 +922,6 @@ class AncsBridgeService : Service() {
                 )
                 if (!writeStarted) {
                     retryOrCompleteBusyOperation(nextOp, "CCCD ${nextOp.label}")
-                }
-            }
-
-            is GattOperation.WriteCccdDescriptor -> {
-                scheduleGattWatchdog("Descriptor ${nextOp.label}")
-                val writeStarted = writeGattDescriptorCompat(gatt, nextOp.descriptor, nextOp.value)
-                if (!writeStarted) {
-                    retryOrCompleteBusyOperation(nextOp, "Descriptor ${nextOp.label}")
                 }
             }
 
@@ -1058,11 +953,6 @@ class AncsBridgeService : Service() {
         }
     }
 
-    /**
-     * If Android 14's Bluetooth stack returns false / ERROR_GATT_WRITE_REQUEST_BUSY (201)
-     * because an incoming Notification Source notification callback was still finishing on the Binder thread,
-     * retry up to 4 times at 80ms intervals instead of dropping the Control Point command!
-     */
     private fun retryOrCompleteBusyOperation(op: GattOperation, label: String) {
         cancelGattWatchdog()
         if (op.retryCount < 4) {
@@ -1074,7 +964,7 @@ class AncsBridgeService : Service() {
             }
             mainHandler.postDelayed({ processNextGattOperation() }, 80L)
         } else {
-            appendLog("GATT write busy after 4 retries ($label)")
+            appendLog("GATT busy after 4 retries ($label)")
             completeCurrentGattOperation()
         }
     }
@@ -1094,7 +984,6 @@ class AncsBridgeService : Service() {
                 gatt.writeDescriptor(descriptor)
             }
         } catch (e: Exception) {
-            appendLog("writeDescriptor exception: ${e.message}")
             false
         }
     }
@@ -1116,13 +1005,12 @@ class AncsBridgeService : Service() {
                 gatt.writeCharacteristic(characteristic)
             }
         } catch (e: Exception) {
-            appendLog("writeCharacteristic exception: ${e.message}")
             false
         }
     }
 
     // =========================================================================
-    // ANCS PACKET DISPATCH, DATA SOURCE 0x03 EXTRACTION & WEAR OS NOTIFICATIONS
+    // ANCS PACKET DISPATCH, CONTACT NAME FOLLOW-UP & WEAR OS NOTIFICATIONS
     // =========================================================================
 
     private fun handleAncsCharacteristicPayload(charUuid: UUID, bytes: ByteArray) {
@@ -1135,8 +1023,6 @@ class AncsBridgeService : Service() {
                 when (event.eventId) {
                     AncsPacketParser.EVENT_ID_NOTIFICATION_ADDED,
                     AncsPacketParser.EVENT_ID_NOTIFICATION_MODIFIED -> {
-                        // Filter out pre-existing notification bursts during initial bond or re-sync
-                        // (except active Incoming Calls, which should always ring immediately)
                         if (event.isPreExisting &&
                             ignorePreExistingAlerts &&
                             event.categoryId != AncsPacketParser.CATEGORY_ID_INCOMING_CALL
@@ -1144,35 +1030,42 @@ class AncsBridgeService : Service() {
                             return
                         }
 
-                        appendLog(
-                            "ANCS Source RX: UID=${event.notificationUid} Cat=${event.categoryId} Flags=0x${
-                                event.eventFlags.toString(16)
-                            }"
-                        )
-                        dataSourceReceivedForUid.remove(event.notificationUid)
+                        // Increment Missed Call or Message counters on Page 1
+                        updateWatchCountersForEvent(event)
 
-                        // Request AppIdentifier (0x00), Title (0x01), Subtitle (0x02 Caller ID),
-                        // and Message Body (0x03, 256B) from Control Point
-                        enqueueNotificationAttributesRequest(event.notificationUid)
-
-                        // For Incoming Calls (CategoryID == 1), immediately wake the watch and ring
-                        // while Control Point fetches Caller Name (0x01) + Phone Number (0x02) (~60ms).
-                        // For regular messages, wait for the real Attribute 0x03 Data Source payload!
                         if (event.categoryId == AncsPacketParser.CATEGORY_ID_INCOMING_CALL) {
+                            activeIncomingCallUids[event.notificationUid] = true
+                        }
+
+                        // Request AppIdentifier (0x00), Title (0x01 Contact Name),
+                        // Subtitle (0x02 Phone Number), and Message (0x03 256B Body)
+                        enqueueNotificationAttributesRequest(
+                            notificationUid = event.notificationUid,
+                            forceRequery = (event.eventId == AncsPacketParser.EVENT_ID_NOTIFICATION_MODIFIED)
+                        )
+
+                        // Only show immediate placeholder if this is a brand-new Incoming Call that hasn't
+                        // received its Data Source attributes yet; for messages, wait for real Data Source!
+                        if (event.categoryId == AncsPacketParser.CATEGORY_ID_INCOMING_CALL &&
+                            realDataAssembledForUid[event.notificationUid] != true
+                        ) {
                             val immediateCallAlert = buildFallbackFromSourceEvent(event)
                             mainHandler.post {
                                 triggerWatchHapticFeedback(isIncomingCall = true)
                                 postIncomingCallWatchNotification(immediateCallAlert)
                                 presentFullScreenMessagePopupOnWatch(immediateCallAlert)
                             }
-                        } else {
+                        } else if (realDataAssembledForUid[event.notificationUid] != true) {
                             scheduleZeroDataSourceFallback(event)
                         }
                     }
 
                     AncsPacketParser.EVENT_ID_NOTIFICATION_REMOVED -> {
+                        activeIncomingCallUids.remove(event.notificationUid)
+                        callContactRequeryCount.remove(event.notificationUid)
                         cancelPendingFallback(event.notificationUid)
                         dataSourceReceivedForUid.remove(event.notificationUid)
+                        realDataAssembledForUid.remove(event.notificationUid)
                         cancelWatchNotificationForUid(event.notificationUid)
                     }
                 }
@@ -1182,8 +1075,6 @@ class AncsBridgeService : Service() {
                 _bridgeState.value = _bridgeState.value.copy(
                     rxDataPackets = _bridgeState.value.rxDataPackets + 1
                 )
-                // If this chunk starts a GetNotificationAttributes response (CommandID == 0x00),
-                // mark that Data Source is actively streaming for this UID and cancel the generic fallback!
                 if (bytes.size >= 5 && bytes[0] == AncsPacketParser.COMMAND_ID_GET_NOTIFICATION_ATTRIBUTES) {
                     val uid = ByteBuffer.wrap(bytes, 1, 4).order(ByteOrder.LITTLE_ENDIAN).int
                     dataSourceReceivedForUid[uid] = true
@@ -1196,47 +1087,57 @@ class AncsBridgeService : Service() {
         }
     }
 
-    /**
-     * Schedules a 350ms idle flush after each Data Source chunk.
-     * In the standard case, checkIfAllAttributesComplete() fires immediately on the final chunk of
-     * AttributeID 0x03 (Message Body). If iOS omits a trailing attribute or truncates a multibyte
-     * UTF-8 sequence at the 256B boundary, this flush guarantees the real extracted attributes
-     * (Title, Subtitle/Caller ID, and Message 0x03) are emitted to the watch UI within 350ms.
-     */
+    private fun updateWatchCountersForEvent(event: AncsPacketParser.NotificationSourceEvent) {
+        if (event.isPreExisting) return
+        when (event.categoryId) {
+            AncsPacketParser.CATEGORY_ID_MISSED_CALL -> {
+                if (countedMissedCallUids.putIfAbsent(event.notificationUid, true) == null) {
+                    _bridgeState.value = _bridgeState.value.copy(
+                        missedCallCount = _bridgeState.value.missedCallCount + 1
+                    )
+                }
+            }
+            AncsPacketParser.CATEGORY_ID_INCOMING_CALL -> {
+                // Incoming calls are tracked live; if missed, iOS sends CategoryID == 2
+            }
+            else -> {
+                if (countedMessageUids.putIfAbsent(event.notificationUid, true) == null) {
+                    _bridgeState.value = _bridgeState.value.copy(
+                        unreadMessageCount = _bridgeState.value.unreadMessageCount + 1
+                    )
+                }
+            }
+        }
+    }
+
     private fun scheduleDataSourceIdleFlush() {
         dataSourceIdleFlushRunnable?.let { mainHandler.removeCallbacks(it) }
         if (!ancsPacketParser.hasPendingAssembly()) return
 
         val runnable = Runnable {
-            val flushed = ancsPacketParser.flushPendingPartialAttributes()
-            if (flushed != null) {
-                appendLog("Flushed partial Data Source stream for UID=${flushed.notificationUid}")
-            }
+            ancsPacketParser.flushPendingPartialAttributes()
         }
         dataSourceIdleFlushRunnable = runnable
         mainHandler.postDelayed(runnable, DATA_SOURCE_IDLE_FLUSH_MS)
     }
 
-    /**
-     * Last-resort fallback that ONLY runs if zero Data Source packets arrived within 1800ms
-     * (e.g., if iOS locked out Control Point attributes for a restricted notification).
-     */
     private fun scheduleZeroDataSourceFallback(event: AncsPacketParser.NotificationSourceEvent) {
         cancelPendingFallback(event.notificationUid)
         val runnable = Runnable {
             pendingFallbackRunnables.remove(event.notificationUid)
-            if (dataSourceReceivedForUid[event.notificationUid] == true) {
+            if (dataSourceReceivedForUid[event.notificationUid] == true ||
+                realDataAssembledForUid[event.notificationUid] == true
+            ) {
                 return@Runnable
             }
-            // Also check if parser has partial bytes waiting to be flushed first
             val flushed = ancsPacketParser.flushPendingPartialAttributes()
             if (flushed != null) {
                 return@Runnable
             }
 
             val fallbackAlert = buildFallbackFromSourceEvent(event)
-            appendLog("Zero Data Source response after ${ZERO_DATA_SOURCE_FALLBACK_MS}ms (UID=${event.notificationUid})")
-            onAncsNotificationReady(fallbackAlert)
+            appendLog("No Data Source response for UID=${event.notificationUid}")
+            onAncsNotificationReady(fallbackAlert, isFromRealDataSource = false)
         }
         pendingFallbackRunnables[event.notificationUid] = runnable
         mainHandler.postDelayed(runnable, ZERO_DATA_SOURCE_FALLBACK_MS)
@@ -1252,42 +1153,85 @@ class AncsBridgeService : Service() {
         event: AncsPacketParser.NotificationSourceEvent
     ): AncsPacketParser.AssembledAncsNotification {
         val isCall = event.categoryId == AncsPacketParser.CATEGORY_ID_INCOMING_CALL
-        val categoryLabel = when (event.categoryId) {
-            AncsPacketParser.CATEGORY_ID_INCOMING_CALL -> "Incoming Call"
-            AncsPacketParser.CATEGORY_ID_MISSED_CALL -> "Missed Call"
-            AncsPacketParser.CATEGORY_ID_VOICEMAIL -> "Voicemail"
-            AncsPacketParser.CATEGORY_ID_SOCIAL -> "Social / Message"
-            AncsPacketParser.CATEGORY_ID_SCHEDULE -> "Calendar Alert"
-            AncsPacketParser.CATEGORY_ID_EMAIL -> "Email"
-            else -> "iPhone Alert"
-        }
+        val appName = ancsPacketParser.resolveFriendlyAppName("", event.categoryId)
         return AncsPacketParser.AssembledAncsNotification(
             notificationUid = event.notificationUid,
             categoryId = event.categoryId,
             eventFlags = event.eventFlags,
             appIdentifier = if (isCall) "com.apple.mobilephone" else "com.apple.Notifications",
-            title = if (isCall) "Incoming iPhone Call" else categoryLabel,
-            subtitle = if (isCall) "Fetching Caller ID..." else "",
+            appDisplayName = appName,
+            title = if (isCall) "Incoming iPhone Call" else appName,
+            subtitle = if (isCall) "Resolving Contact Name..." else "",
             message = if (isCall) {
-                "Requesting Caller Name & Number from iPhone..."
+                "Fetching Caller ID from iPhone..."
             } else {
-                "Notification #${event.notificationUid} received from iPhone"
+                "Fetching message body from iPhone..."
             },
+            rawAppId = "",
+            rawTitle = "",
+            rawSubtitle = "",
+            rawMessage = "",
             hasPositiveAction = event.hasPositiveAction || isCall,
             hasNegativeAction = event.hasNegativeAction || true
         )
     }
 
-    private fun onAncsNotificationReady(alert: AncsPacketParser.AssembledAncsNotification) {
+    private fun onAncsNotificationReady(
+        alert: AncsPacketParser.AssembledAncsNotification,
+        isFromRealDataSource: Boolean
+    ) {
         cancelPendingFallback(alert.notificationUid)
         dataSourceIdleFlushRunnable?.let { mainHandler.removeCallbacks(it) }
 
-        val callerInfo = if (alert.subtitle.isNotBlank()) " (${alert.subtitle})" else ""
-        appendLog(
-            "ANCS 0x03 Ready [UID=${alert.notificationUid}]: ${alert.title}$callerInfo — ${
-                alert.message.take(48)
-            }"
-        )
+        if (isFromRealDataSource) {
+            realDataAssembledForUid[alert.notificationUid] = true
+
+            // Release the GATT queue lock if we were waiting on Data Source for this UID
+            val activeOp = synchronized(gattQueueLock) { activeInFlightOperation }
+            if (activeOp is GattOperation.RequestNotificationAttributes) {
+                completeCurrentGattOperation()
+            }
+
+            // Update raw ANCS attributes in state for Page 2 live inspection
+            _bridgeState.value = _bridgeState.value.copy(
+                lastRawAppId = alert.rawAppId.ifBlank { "(empty)" },
+                lastRawTitle = alert.rawTitle.ifBlank { "(empty)" },
+                lastRawSubtitle = alert.rawSubtitle.ifBlank { "(empty)" },
+                lastRawMessage = alert.rawMessage.ifBlank { "(empty)" }
+            )
+
+            appendLog(
+                "RX [${alert.appDisplayName}] T=\"${alert.rawTitle}\" S=\"${alert.rawSubtitle}\" M=\"${
+                    alert.rawMessage.take(36)
+                }\""
+            )
+
+            // If this is an active Incoming Call and iOS only returned a phone number so far
+            // (no alphabetic letters in title yet), re-query Control Point after 550ms / 1250ms
+            // to catch iOS Contacts asynchronous name resolution!
+            if (alert.categoryId == AncsPacketParser.CATEGORY_ID_INCOMING_CALL &&
+                activeIncomingCallUids.containsKey(alert.notificationUid)
+            ) {
+                val hasContactNameLetters = alert.title.any { it.isLetter() } &&
+                    !alert.title.equals("Incoming Call", ignoreCase = true) &&
+                    !alert.title.equals("Incoming iPhone Call", ignoreCase = true)
+                val attempts = callContactRequeryCount.getOrDefault(alert.notificationUid, 0)
+                if (!hasContactNameLetters && attempts < 2) {
+                    callContactRequeryCount[alert.notificationUid] = attempts + 1
+                    val delayMs = if (attempts == 0) 550L else 1250L
+                    mainHandler.postDelayed({
+                        if (activeIncomingCallUids.containsKey(alert.notificationUid)) {
+                            appendLog("Re-querying iOS Contact Name for Call UID=${alert.notificationUid}")
+                            enqueueNotificationAttributesRequest(alert.notificationUid, forceRequery = true)
+                        }
+                    }, delayMs)
+                }
+            }
+        } else if (realDataAssembledForUid[alert.notificationUid] == true) {
+            // Never allow a fallback to overwrite an already-assembled real Data Source notification!
+            return
+        }
+
         _bridgeState.value = _bridgeState.value.copy(lastNotification = alert)
 
         wakeWatchScreenBriefly()
@@ -1301,8 +1245,6 @@ class AncsBridgeService : Service() {
             postStandardMessageWatchNotification(alert)
         }
 
-        // Launch or update the round full-screen popup on the OnePlus Watch 2R with the full
-        // 256B Attribute 0x03 Message Body and Caller ID (Title + Subtitle)
         presentFullScreenMessagePopupOnWatch(alert)
     }
 
@@ -1316,6 +1258,7 @@ class AncsBridgeService : Service() {
                 putExtra(EXTRA_NOTIFICATION_UID, alert.notificationUid)
                 putExtra(EXTRA_CATEGORY_ID, alert.categoryId)
                 putExtra(EXTRA_APP_ID, alert.appIdentifier)
+                putExtra(EXTRA_APP_NAME, alert.appDisplayName)
                 putExtra(EXTRA_TITLE, alert.title)
                 putExtra(EXTRA_SUBTITLE, alert.subtitle)
                 putExtra(EXTRA_MESSAGE, alert.message)
@@ -1324,7 +1267,7 @@ class AncsBridgeService : Service() {
             }
             startActivity(popupIntent)
         } catch (e: Exception) {
-            Log.w(TAG, "Unable to launch full-screen popup activity directly: ${e.message}")
+            Log.w(TAG, "Unable to launch full-screen popup activity: ${e.message}")
         }
     }
 
@@ -1339,9 +1282,7 @@ class AncsBridgeService : Service() {
                 "op2r:ancs_alert_wakeup"
             )
             wakeLock.acquire(5000L)
-        } catch (e: Exception) {
-            Log.w(TAG, "WakeLock acquire failed: ${e.message}")
-        }
+        } catch (_: Exception) {}
     }
 
     private fun triggerWatchHapticFeedback(isIncomingCall: Boolean) {
@@ -1362,9 +1303,7 @@ class AncsBridgeService : Service() {
                 longArrayOf(0, 180, 90, 220)
             }
             vibrator.vibrate(VibrationEffect.createWaveform(timings, -1))
-        } catch (e: Exception) {
-            Log.w(TAG, "Vibration error: ${e.message}")
-        }
+        } catch (_: Exception) {}
     }
 
     private fun postIncomingCallWatchNotification(alert: AncsPacketParser.AssembledAncsNotification) {
@@ -1375,6 +1314,7 @@ class AncsBridgeService : Service() {
             putExtra(EXTRA_NOTIFICATION_UID, alert.notificationUid)
             putExtra(EXTRA_CATEGORY_ID, alert.categoryId)
             putExtra(EXTRA_APP_ID, alert.appIdentifier)
+            putExtra(EXTRA_APP_NAME, alert.appDisplayName)
             putExtra(EXTRA_TITLE, alert.title)
             putExtra(EXTRA_SUBTITLE, alert.subtitle)
             putExtra(EXTRA_MESSAGE, alert.message)
@@ -1399,7 +1339,6 @@ class AncsBridgeService : Service() {
             requestCodeOffset = 20_000
         )
 
-        // Format Caller ID with both Caller Name (title) and Phone Number (subtitle)
         val callerDisplayName = if (alert.subtitle.isNotBlank() && alert.subtitle != alert.title) {
             "${alert.title} • ${alert.subtitle}"
         } else {
@@ -1447,6 +1386,7 @@ class AncsBridgeService : Service() {
             putExtra(EXTRA_NOTIFICATION_UID, alert.notificationUid)
             putExtra(EXTRA_CATEGORY_ID, alert.categoryId)
             putExtra(EXTRA_APP_ID, alert.appIdentifier)
+            putExtra(EXTRA_APP_NAME, alert.appDisplayName)
             putExtra(EXTRA_TITLE, alert.title)
             putExtra(EXTRA_SUBTITLE, alert.subtitle)
             putExtra(EXTRA_MESSAGE, alert.message)
@@ -1466,11 +1406,7 @@ class AncsBridgeService : Service() {
             requestCodeOffset = 30_000
         )
 
-        val headerTitle = if (alert.subtitle.isNotBlank()) {
-            "${alert.title} (${alert.subtitle})"
-        } else {
-            alert.title
-        }
+        val headerTitle = "${alert.appDisplayName} • ${alert.title}"
 
         val builder = NotificationCompat.Builder(this, CHANNEL_IOS_MESSAGES)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
@@ -1547,11 +1483,11 @@ class AncsBridgeService : Service() {
             val bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
 
             if (device != null && bondState == BluetoothDevice.BOND_BONDED) {
-                appendLog("SMP Bond completed with ${device.address} — discovering ANCS")
+                appendLog("Bonded with ${device.address} — discovering ANCS")
                 targetIosDevice = device
                 _bridgeState.value = _bridgeState.value.copy(
                     isBonded = true,
-                    statusText = "BONDED • SUBSCRIBING ANCS"
+                    statusText = "BONDED • SUBSCRIBING"
                 )
                 if (activeGatt != null) {
                     activeGatt?.discoverServices()
@@ -1576,10 +1512,6 @@ class AncsBridgeService : Service() {
             unregisterReceiver(bondStateReceiver)
         } catch (_: Exception) {}
     }
-
-    // =========================================================================
-    // FOREGROUND SERVICE & NOTIFICATION CHANNEL INFRASTRUCTURE
-    // =========================================================================
 
     private fun createNotificationChannels() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -1656,7 +1588,6 @@ class AncsBridgeService : Service() {
     private fun disconnectAndStopAll() {
         stopKeepAliveHeartbeat()
         stopModeAPeripheralAdvertising()
-        stopModeBCentralScanning()
         clearGattQueue()
         try {
             activeGatt?.disconnect()
@@ -1668,14 +1599,11 @@ class AncsBridgeService : Service() {
         } finally {
             gattServer = null
         }
-        updateStatus("STOPPED", _bridgeState.value.discoveryMode)
+        updateStatus("STOPPED")
     }
 
-    private fun updateStatus(status: String, mode: DiscoveryMode) {
-        _bridgeState.value = _bridgeState.value.copy(
-            statusText = status,
-            discoveryMode = mode
-        )
+    private fun updateStatus(status: String) {
+        _bridgeState.value = _bridgeState.value.copy(statusText = status)
     }
 
     private fun appendLog(entry: String) {
@@ -1684,6 +1612,4 @@ class AncsBridgeService : Service() {
         val updated = (listOf(entry) + current).take(25)
         _bridgeState.value = _bridgeState.value.copy(diagnosticLog = updated)
     }
-
-    private fun shortUuid(uuid: UUID): String = uuid.toString().substring(0, 8).uppercase()
 }

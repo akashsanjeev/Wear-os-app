@@ -12,13 +12,16 @@ import android.os.Build
 import android.os.Bundle
 import android.text.TextUtils
 import android.util.TypedValue
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.TextClock
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,24 +30,45 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 /**
  * Wear OS 5.0 (API 34) Round Watch Activity for OnePlus Watch 2R (OPWWE234 - 466x466 px).
  *
- * Uses circular chord geometry:
- * - Inscribed safe square padding (~14.64% = 68px on a 466x466 display) so zero text or buttons
- *   clip against the round AMOLED bezel.
- * - Includes an interactive full-screen Notification & Incoming Call Popup Overlay that displays:
- *   1. Caller Name (Attribute 0x01 Title) + Caller Phone Number (Attribute 0x02 Subtitle)
- *      with Answer (Positive Action 0x00) and Decline (Negative Action 0x01) buttons.
- *   2. Full 256-byte Message Body (Attribute 0x03) inside an inscribed scrollable card.
+ * Implements a 2-Page Horizontal Swipe UI inside the inscribed circular safe area:
+ * - Page 1 (Main Watch Face - Zero Accidental Presses):
+ *   Digital Clock, Date, Connection Status, Missed Calls Counter Pill, Messages Counter Pill,
+ *   and a single "Clear All" button.
+ * - Page 2 (Swipe Side - Controls & Raw Diagnostics):
+ *   Dedicated "Advertise iPhone (A)" button (Mode B removed), "Re-Sync ANCS", "Test Alert",
+ *   Live Raw ANCS Attribute Inspector (Title 0x01, Subtitle 0x02, Message 0x03, AppID 0x00),
+ *   and BLE Telemetry Logs.
+ * - Full-Screen Popup Overlay:
+ *   Wakes the watch to display Incoming Calls (Contact Name + Phone Number + Accept/Decline)
+ *   and Full 256-Byte Message Body cards.
  */
 class MainActivity : ComponentActivity() {
 
+    // Page navigation state (0 = Page 1 Clock & Counters, 1 = Page 2 Controls & Diagnostics)
+    private var currentPageIndex: Int = 0
+    private lateinit var page1ClockContainer: LinearLayout
+    private lateinit var page2ControlsScroll: ScrollView
+    private lateinit var pageDot1View: TextView
+    private lateinit var pageDot2View: TextView
+    private lateinit var pageHintView: TextView
+
+    // Page 1 Views (Glanceable Clock + Missed Calls + Messages + Clear Button)
+    private lateinit var page1ConnectionPill: TextView
+    private lateinit var page1MissedCallsBadge: TextView
+    private lateinit var page1MessagesBadge: TextView
+    private lateinit var page1LastPreviewText: TextView
+    private lateinit var page1ClearButton: Button
+
+    // Page 2 Views (Controls + Raw ANCS Attribute Inspector + Logs)
     private lateinit var statusBadgeView: TextView
     private lateinit var deviceInfoView: TextView
     private lateinit var telemetryStatsView: TextView
-    private lateinit var lastAlertSummaryView: TextView
+    private lateinit var rawAttributesBoxView: TextView
     private lateinit var logFeedView: TextView
 
     // Full-screen circular popup overlay views
@@ -60,6 +84,7 @@ class MainActivity : ComponentActivity() {
 
     private var activePopupUid: Int = -1
     private var lastShownPopupSignature: String = ""
+    private lateinit var swipeGestureDetector: GestureDetector
 
     private val requiredPermissions: Array<String>
         get() = buildList {
@@ -88,7 +113,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableWakeAndShowWhenLocked()
-        setContentView(buildCircularSafeWatchLayout())
+        setupHorizontalSwipeDetector()
+        setContentView(buildCircularTwoPageWatchLayout())
         observeBridgeState()
         ensurePermissionsAndStartBridge()
         handleIncomingPopupIntent(intent)
@@ -98,6 +124,64 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleIncomingPopupIntent(intent)
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        // Intercept horizontal swipe gestures when the full-screen alert popup is not covering the screen
+        if (::popupOverlayContainer.isInitialized &&
+            popupOverlayContainer.visibility != View.VISIBLE &&
+            ::swipeGestureDetector.isInitialized
+        ) {
+            swipeGestureDetector.onTouchEvent(ev)
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
+    private fun setupHorizontalSwipeDetector() {
+        swipeGestureDetector = GestureDetector(
+            this,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onFling(
+                    e1: MotionEvent?,
+                    e2: MotionEvent,
+                    velocityX: Float,
+                    velocityY: Float
+                ): Boolean {
+                    if (e1 == null) return false
+                    val deltaX = e2.x - e1.x
+                    val deltaY = e2.y - e1.y
+                    if (abs(deltaX) > abs(deltaY) && abs(deltaX) > dp(38) && abs(velocityX) > 180f) {
+                        if (deltaX < 0 && currentPageIndex == 0) {
+                            // Swipe Left -> Go to Page 2 (Controls & Diagnostics)
+                            switchToPage(1)
+                            return true
+                        } else if (deltaX > 0 && currentPageIndex == 1) {
+                            // Swipe Right -> Go back to Page 1 (Clock & Counters)
+                            switchToPage(0)
+                            return true
+                        }
+                    }
+                    return false
+                }
+            }
+        )
+    }
+
+    private fun switchToPage(pageIndex: Int) {
+        currentPageIndex = pageIndex.coerceIn(0, 1)
+        if (currentPageIndex == 0) {
+            page1ClockContainer.visibility = View.VISIBLE
+            page2ControlsScroll.visibility = View.GONE
+            pageDot1View.setTextColor(Color.parseColor("#38BDF8"))
+            pageDot2View.setTextColor(Color.parseColor("#52525B"))
+            pageHintView.text = "Swipe Left for Controls"
+        } else {
+            page1ClockContainer.visibility = View.GONE
+            page2ControlsScroll.visibility = View.VISIBLE
+            pageDot1View.setTextColor(Color.parseColor("#52525B"))
+            pageDot2View.setTextColor(Color.parseColor("#38BDF8"))
+            pageHintView.text = "Swipe Right for Clock"
+        }
     }
 
     private fun enableWakeAndShowWhenLocked() {
@@ -116,42 +200,167 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Builds the root FrameLayout containing:
-     * 1. The scrollable circular-safe ANCS Bridge dashboard.
-     * 2. The full-screen circular-inscribed Message & Caller ID Popup Overlay.
-     */
-    private fun buildCircularSafeWatchLayout(): View {
+    private fun buildCircularTwoPageWatchLayout(): View {
         val metrics = resources.displayMetrics
         val screenMinPx = minOf(metrics.widthPixels, metrics.heightPixels)
-        // Inscribed square margin for a circle: (1 - sqrt(2)/2) / 2 ≈ 0.14645 of diameter
+        // Inscribed square margin for a 466x466 circle: ~14.65% of diameter
         val inscribedInsetPx = (screenMinPx * 0.1465f).toInt().coerceAtLeast(dp(26))
 
         val rootFrame = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
         }
 
-        val scrollRoot = ScrollView(this).apply {
-            setBackgroundColor(Color.BLACK)
-            isFillViewport = true
-            isVerticalScrollBarEnabled = false
-        }
-
-        val container = LinearLayout(this).apply {
+        // =====================================================================
+        // PAGE 1: MINIMAL DIGITAL CLOCK + MISSED CALLS + MESSAGES + CLEAR BUTTON
+        // =====================================================================
+        page1ClockContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
+            gravity = Gravity.CENTER
             setPadding(
                 inscribedInsetPx,
-                inscribedInsetPx,
+                inscribedInsetPx - dp(6),
                 inscribedInsetPx,
                 inscribedInsetPx + dp(18)
             )
         }
 
+        page1ConnectionPill = TextView(this).apply {
+            text = "● STARTING ANCS..."
+            setTextColor(Color.parseColor("#10B981"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(2), dp(8), dp(2))
+        }
+
+        val digitalClock = TextClock(this).apply {
+            format12Hour = "hh:mm"
+            format24Hour = "HH:mm"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 36f)
+            typeface = Typeface.create("sans-serif-light", Typeface.BOLD)
+            gravity = Gravity.CENTER
+        }
+
+        val dateClock = TextClock(this).apply {
+            format12Hour = "EEE, MMM d"
+            format24Hour = "EEE, MMM d"
+            setTextColor(Color.parseColor("#9CA3AF"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(6))
+        }
+
+        // 2-Column Counter Badges: Missed Calls & Messages
+        val countersRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(2), 0, dp(6))
+        }
+
+        page1MissedCallsBadge = TextView(this).apply {
+            text = "0 Calls"
+            setTextColor(Color.parseColor("#FDA4AF"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundedDrawable("#1F1218", "#881337", dp(12))
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            setOnClickListener {
+                val last = AncsBridgeService.bridgeState.value.lastNotification
+                if (last != null) showNotificationPopupCard(last)
+            }
+        }
+
+        page1MessagesBadge = TextView(this).apply {
+            text = "0 Msgs"
+            setTextColor(Color.parseColor("#7DD3FC"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createRoundedDrawable("#0F1B29", "#0369A1", dp(12))
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            setOnClickListener {
+                val last = AncsBridgeService.bridgeState.value.lastNotification
+                if (last != null) showNotificationPopupCard(last)
+            }
+        }
+
+        countersRow.addView(
+            page1MissedCallsBadge,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(4)
+            }
+        )
+        countersRow.addView(
+            page1MessagesBadge,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(4)
+            }
+        )
+
+        page1LastPreviewText = TextView(this).apply {
+            text = "No unread alerts"
+            setTextColor(Color.parseColor("#A1A1AA"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+            gravity = Gravity.CENTER
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(dp(4), 0, dp(4), dp(6))
+            setOnClickListener {
+                val last = AncsBridgeService.bridgeState.value.lastNotification
+                if (last != null) showNotificationPopupCard(last)
+            }
+        }
+
+        page1ClearButton = createWatchActionButton(
+            label = "Clear Counts",
+            bgColorHex = "#1E293B"
+        ) {
+            startBridgeService(AncsBridgeService.ACTION_CLEAR_COUNTERS)
+        }
+
+        page1ClockContainer.addView(page1ConnectionPill)
+        page1ClockContainer.addView(digitalClock)
+        page1ClockContainer.addView(dateClock)
+        page1ClockContainer.addView(
+            countersRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        page1ClockContainer.addView(page1LastPreviewText)
+        page1ClockContainer.addView(
+            page1ClearButton,
+            LinearLayout.LayoutParams(dp(116), dp(30))
+        )
+
+        // =====================================================================
+        // PAGE 2: SWIPE SIDE -> CONTROLS (MODE A ONLY) + RAW ATTRIBUTE LOGS
+        // =====================================================================
+        page2ControlsScroll = ScrollView(this).apply {
+            setBackgroundColor(Color.BLACK)
+            isFillViewport = true
+            isVerticalScrollBarEnabled = false
+            visibility = View.GONE
+        }
+
+        val page2Container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(
+                inscribedInsetPx,
+                inscribedInsetPx - dp(4),
+                inscribedInsetPx,
+                inscribedInsetPx + dp(26)
+            )
+        }
+
         val headerTitle = TextView(this).apply {
-            text = "OP2R • iOS ANCS"
+            text = "CONTROLS • MODE A"
             setTextColor(Color.parseColor("#38BDF8"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             gravity = Gravity.CENTER
         }
@@ -159,65 +368,45 @@ class MainActivity : ComponentActivity() {
         statusBadgeView = TextView(this).apply {
             text = "INITIALIZING..."
             setTextColor(Color.parseColor("#10B981"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            setPadding(dp(8), dp(4), dp(8), dp(2))
+            setPadding(dp(4), dp(2), dp(4), dp(2))
         }
 
         deviceInfoView = TextView(this).apply {
-            text = "No iPhone Connected • MTU 23"
+            text = "No iPhone • MTU 23"
             setTextColor(Color.parseColor("#A1A1AA"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
             gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(2))
         }
 
         telemetryStatsView = TextView(this).apply {
-            text = "RX Src: 0 • Data(0x03): 0 • HB: 0"
+            text = "Src:0 • 0x03:0 • HB:0"
             setTextColor(Color.parseColor("#38BDF8"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
             typeface = Typeface.MONOSPACE
             gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(6))
+            setPadding(0, dp(1), 0, dp(5))
         }
 
-        // Primary Mode A / Mode B Controls
-        val modeRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-
-        val modeAButton = createWatchActionButton(
-            label = "Advertise (A)",
+        // Single Full-Width Mode A Button (Scan Beacon B removed per user request)
+        val advertiseModeAButton = createWatchActionButton(
+            label = "Advertise iPhone (Mode A)",
             bgColorHex = "#0284C7"
         ) {
             startBridgeService(AncsBridgeService.ACTION_START_MODE_A_PERIPHERAL)
         }
 
-        val modeBButton = createWatchActionButton(
-            label = "Scan iOS (B)",
-            bgColorHex = "#27272A"
-        ) {
-            startBridgeService(AncsBridgeService.ACTION_START_MODE_B_CENTRAL)
-        }
-
-        modeRow.addView(modeAButton, LinearLayout.LayoutParams(0, dp(32), 1f).apply {
-            marginEnd = dp(4)
-        })
-        modeRow.addView(modeBButton, LinearLayout.LayoutParams(0, dp(32), 1f).apply {
-            marginStart = dp(4)
-        })
-
-        // Secondary Diagnostic Controls: Re-Sync ANCS + Test Alert Popup
+        // Diagnostic Controls Row: Re-Sync ANCS + Test Alert
         val diagRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(5), 0, dp(6))
+            setPadding(0, dp(4), 0, dp(6))
         }
 
         val resyncButton = createWatchActionButton(
-            label = "Re-Sync ANCS",
+            label = "Re-Sync",
             bgColorHex = "#0F766E"
         ) {
             startBridgeService(AncsBridgeService.ACTION_RESYNC_ANCS)
@@ -237,56 +426,52 @@ class MainActivity : ComponentActivity() {
             marginStart = dp(4)
         })
 
-        lastAlertSummaryView = TextView(this).apply {
-            text = "Waiting for iPhone calls & notifications..."
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
-            gravity = Gravity.CENTER
-            background = createRoundedDrawable("#18181B", "#27272A", dp(10))
+        // Raw ANCS Attribute Inspector Box (verifies iOS Contact Name, Subtitle, Message, AppID)
+        rawAttributesBoxView = TextView(this).apply {
+            text = "RAW ANCS INSPECTOR\nApp(0x00): —\nTitle(0x01): —\nSub(0x02): —\nMsg(0x03): —"
+            setTextColor(Color.parseColor("#E2E8F0"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+            typeface = Typeface.MONOSPACE
+            gravity = Gravity.START
+            background = createRoundedDrawable("#111827", "#1E293B", dp(10))
             setPadding(dp(8), dp(6), dp(8), dp(6))
-            setOnClickListener {
-                val last = AncsBridgeService.bridgeState.value.lastNotification
-                if (last != null) {
-                    showNotificationPopupCard(last)
-                }
-            }
         }
 
         logFeedView = TextView(this).apply {
             text = "GATT Telemetry Ready"
             setTextColor(Color.parseColor("#71717A"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 8.5f)
             typeface = Typeface.MONOSPACE
             gravity = Gravity.START
             setPadding(dp(4), dp(6), dp(4), dp(4))
         }
 
-        container.addView(headerTitle)
-        container.addView(statusBadgeView)
-        container.addView(deviceInfoView)
-        container.addView(telemetryStatsView)
-        container.addView(
-            modeRow,
+        page2Container.addView(headerTitle)
+        page2Container.addView(statusBadgeView)
+        page2Container.addView(deviceInfoView)
+        page2Container.addView(telemetryStatsView)
+        page2Container.addView(
+            advertiseModeAButton,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+                dp(32)
             )
         )
-        container.addView(
+        page2Container.addView(
             diagRow,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
-        container.addView(
-            lastAlertSummaryView,
+        page2Container.addView(
+            rawAttributesBoxView,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
-        container.addView(
+        page2Container.addView(
             logFeedView,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -294,12 +479,71 @@ class MainActivity : ComponentActivity() {
             )
         )
 
-        scrollRoot.addView(container)
+        page2ControlsScroll.addView(page2Container)
+
+        // =====================================================================
+        // BOTTOM PAGE INDICATOR DOTS (TAP OR SWIPE TO SWITCH PAGES)
+        // =====================================================================
+        val pagerFooter = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(2), 0, dp(8))
+            setOnClickListener {
+                switchToPage(if (currentPageIndex == 0) 1 else 0)
+            }
+        }
+
+        val dotsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        pageDot1View = TextView(this).apply {
+            text = "●"
+            setTextColor(Color.parseColor("#38BDF8"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(dp(4), 0, dp(4), 0)
+        }
+
+        pageDot2View = TextView(this).apply {
+            text = "●"
+            setTextColor(Color.parseColor("#52525B"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(dp(4), 0, dp(4), 0)
+        }
+
+        pageHintView = TextView(this).apply {
+            text = "Swipe Left for Controls"
+            setTextColor(Color.parseColor("#71717A"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 8.5f)
+            gravity = Gravity.CENTER
+        }
+
+        dotsRow.addView(pageDot1View)
+        dotsRow.addView(pageDot2View)
+        pagerFooter.addView(dotsRow)
+        pagerFooter.addView(pageHintView)
+
         rootFrame.addView(
-            scrollRoot,
+            page1ClockContainer,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        rootFrame.addView(
+            page2ControlsScroll,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        rootFrame.addView(
+            pagerFooter,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
             )
         )
 
@@ -316,12 +560,6 @@ class MainActivity : ComponentActivity() {
         return rootFrame
     }
 
-    /**
-     * Builds the full-screen circular-safe Notification & Caller ID Popup Overlay.
-     * - Displays Caller Name (Title 0x01) + Caller Phone Number (Subtitle 0x02) +
-     *   Full 256-byte Message Body (Message 0x03) inside an inscribed scrollable card.
-     * - Strictly bounded within the 466x466 circular chord so zero text or buttons clip.
-     */
     private fun buildCircularInscribedNotificationPopup(inscribedInsetPx: Int): FrameLayout {
         val overlay = FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#F5000000"))
@@ -357,18 +595,17 @@ class MainActivity : ComponentActivity() {
         }
 
         popupAppNameView = TextView(this).apply {
-            text = "iMessage"
+            text = "Messages"
             setTextColor(Color.parseColor("#9CA3AF"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             gravity = Gravity.CENTER
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
             setPadding(0, dp(1), 0, dp(2))
         }
 
-        // Caller Name or Sender Name (ANCS Attribute 0x01 Title)
         popupTitleView = TextView(this).apply {
-            text = "Sender Name"
+            text = "Contact Name"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             typeface = Typeface.DEFAULT_BOLD
@@ -378,7 +615,6 @@ class MainActivity : ComponentActivity() {
             setPadding(0, dp(1), 0, dp(1))
         }
 
-        // Caller ID Phone Number or Thread Subtitle (ANCS Attribute 0x02 Subtitle)
         popupSubtitleView = TextView(this).apply {
             text = ""
             setTextColor(Color.parseColor("#38BDF8"))
@@ -391,7 +627,6 @@ class MainActivity : ComponentActivity() {
             setPadding(0, 0, 0, dp(4))
         }
 
-        // Inscribed scrollable message box for the full 256-byte Attribute 0x03 Message Body
         val messageScroll = ScrollView(this).apply {
             isVerticalScrollBarEnabled = true
             background = createRoundedDrawable("#090D16", "#1F2937", dp(10))
@@ -498,14 +733,24 @@ class MainActivity : ComponentActivity() {
         val uid = intent.getIntExtra(AncsBridgeService.EXTRA_NOTIFICATION_UID, -1)
         if (uid == -1) return
 
+        val appId = intent.getStringExtra(AncsBridgeService.EXTRA_APP_ID).orEmpty()
+        val appName = intent.getStringExtra(AncsBridgeService.EXTRA_APP_NAME)
+            .orEmpty()
+            .ifBlank { formatReadableAppId(appId, false) }
+
         val alert = AncsPacketParser.AssembledAncsNotification(
             notificationUid = uid,
             categoryId = intent.getIntExtra(AncsBridgeService.EXTRA_CATEGORY_ID, 0),
             eventFlags = 0,
-            appIdentifier = intent.getStringExtra(AncsBridgeService.EXTRA_APP_ID).orEmpty(),
+            appIdentifier = appId,
+            appDisplayName = appName,
             title = intent.getStringExtra(AncsBridgeService.EXTRA_TITLE).orEmpty(),
             subtitle = intent.getStringExtra(AncsBridgeService.EXTRA_SUBTITLE).orEmpty(),
             message = intent.getStringExtra(AncsBridgeService.EXTRA_MESSAGE).orEmpty(),
+            rawAppId = appId,
+            rawTitle = intent.getStringExtra(AncsBridgeService.EXTRA_TITLE).orEmpty(),
+            rawSubtitle = intent.getStringExtra(AncsBridgeService.EXTRA_SUBTITLE).orEmpty(),
+            rawMessage = intent.getStringExtra(AncsBridgeService.EXTRA_MESSAGE).orEmpty(),
             hasPositiveAction = intent.getBooleanExtra(AncsBridgeService.EXTRA_HAS_POSITIVE, false),
             hasNegativeAction = intent.getBooleanExtra(AncsBridgeService.EXTRA_HAS_NEGATIVE, true)
         )
@@ -517,16 +762,19 @@ class MainActivity : ComponentActivity() {
         activePopupUid = alert.notificationUid
         val isCall = alert.categoryId == AncsPacketParser.CATEGORY_ID_INCOMING_CALL
 
-        popupCategoryBadge.text = if (isCall) "INCOMING IPHONE CALL" else "ANCS 0x03 MESSAGE"
+        popupCategoryBadge.text = if (isCall) "INCOMING IPHONE CALL" else alert.appDisplayName.uppercase()
         popupCategoryBadge.setTextColor(
             Color.parseColor(if (isCall) "#10B981" else "#38BDF8")
         )
-        popupAppNameView.text = formatReadableAppId(alert.appIdentifier, isCall)
-        popupTitleView.text = alert.title.ifBlank { if (isCall) "Incoming Call" else "iPhone Alert" }
+        popupAppNameView.text = if (isCall) "iPhone Call • Caller ID" else alert.appIdentifier
+        popupTitleView.text = alert.title.ifBlank { if (isCall) "Incoming Call" else alert.appDisplayName }
         popupTitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (isCall) 15f else 14f)
 
-        if (alert.subtitle.isNotBlank() && alert.subtitle != alert.title) {
-            popupSubtitleView.text = if (isCall) "ID: ${alert.subtitle}" else alert.subtitle
+        if (alert.subtitle.isNotBlank() &&
+            alert.subtitle != alert.title &&
+            alert.subtitle != alert.appDisplayName
+        ) {
+            popupSubtitleView.text = if (isCall) "Number: ${alert.subtitle}" else alert.subtitle
             popupSubtitleView.visibility = View.VISIBLE
         } else {
             popupSubtitleView.visibility = View.GONE
@@ -554,15 +802,14 @@ class MainActivity : ComponentActivity() {
     private fun formatReadableAppId(appId: String, isCall: Boolean): String {
         val lower = appId.lowercase()
         return when {
-            isCall || lower.contains("mobilephone") || lower.contains("incallservice") ->
-                "iPhone Phone • Caller ID"
-            lower.contains("mobilesms") -> "iMessage • SMS"
+            isCall || lower.contains("mobilephone") || lower.contains("incallservice") -> "Phone"
+            lower.contains("mobilesms") -> "Messages"
             lower.contains("whatsapp") -> "WhatsApp"
             lower.contains("telegram") -> "Telegram"
             lower.contains("instagram") -> "Instagram"
             lower.contains("gmail") || lower.contains("mobilemail") -> "Mail"
             lower.contains("slack") -> "Slack"
-            else -> appId.substringAfterLast('.').ifBlank { "iOS App" }
+            else -> appId.substringAfterLast('.').ifBlank { "iPhone Alert" }
         }
     }
 
@@ -570,6 +817,35 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 AncsBridgeService.bridgeState.collect { state ->
+                    // Update Page 1 (Clock & Counters)
+                    val isConnected = state.isAncsSubscribed
+                    page1ConnectionPill.text = if (isConnected) {
+                        "● CONNECTED • ${state.connectedDeviceName ?: "iPhone"}"
+                    } else {
+                        "● ${state.statusText}"
+                    }
+                    page1ConnectionPill.setTextColor(
+                        Color.parseColor(if (isConnected) "#10B981" else "#38BDF8")
+                    )
+
+                    page1MissedCallsBadge.text = "${state.missedCallCount} Missed"
+                    page1MessagesBadge.text = "${state.unreadMessageCount} Msgs"
+
+                    val last = state.lastNotification
+                    if (last != null) {
+                        page1LastPreviewText.text = "${last.appDisplayName}: ${last.title} — ${last.message}"
+
+                        val signature =
+                            "${last.notificationUid}:${last.title}:${last.subtitle}:${last.message}"
+                        if (signature != lastShownPopupSignature) {
+                            lastShownPopupSignature = signature
+                            showNotificationPopupCard(last)
+                        }
+                    } else {
+                        page1LastPreviewText.text = "No unread alerts"
+                    }
+
+                    // Update Page 2 (Controls & Raw ANCS Inspector)
                     statusBadgeView.text = state.statusText
                     val devName = state.connectedDeviceName ?: "No iPhone"
                     val bondTag = if (state.isBonded) "Bonded" else "Unbonded"
@@ -578,18 +854,12 @@ class MainActivity : ComponentActivity() {
                     telemetryStatsView.text =
                         "Src:${state.rxSourcePackets} • 0x03:${state.rxDataPackets} • HB:${state.keepAlivePings}"
 
-                    val last = state.lastNotification
-                    if (last != null) {
-                        val subtitleTag = if (last.subtitle.isNotBlank()) " (${last.subtitle})" else ""
-                        lastAlertSummaryView.text =
-                            "[UID ${last.notificationUid}] ${last.title}$subtitleTag\n${last.message}\n(Tap to open)"
-
-                        // Automatically pop up or update in-place when Title/Subtitle/Message 0x03 updates
-                        val signature = "${last.notificationUid}:${last.title}:${last.subtitle}:${last.message}"
-                        if (signature != lastShownPopupSignature) {
-                            lastShownPopupSignature = signature
-                            showNotificationPopupCard(last)
-                        }
+                    rawAttributesBoxView.text = buildString {
+                        append("RAW ANCS INSPECTOR\n")
+                        append("App(0x00): ${state.lastRawAppId}\n")
+                        append("Title(0x01): ${state.lastRawTitle}\n")
+                        append("Sub(0x02): ${state.lastRawSubtitle}\n")
+                        append("Msg(0x03): ${state.lastRawMessage.take(80)}")
                     }
 
                     if (state.diagnosticLog.isNotEmpty()) {
