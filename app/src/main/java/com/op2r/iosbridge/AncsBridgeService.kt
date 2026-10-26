@@ -658,12 +658,6 @@ class AncsBridgeService : Service() {
             gatt.discoverServices()
         }
 
-        override fun onServiceChanged(gatt: BluetoothGatt) {
-            appendLog("GATT service changed — re-subscribing ANCS")
-            clearGattQueue()
-            gatt.discoverServices()
-        }
-
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 appendLog("discoverServices failed ($status)")

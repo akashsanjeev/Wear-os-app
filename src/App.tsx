@@ -1040,30 +1040,34 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                     ) : null}
                   </AnimatePresence>
 
-                  {/* LAYER 1: 2-PAGE HORIZONTAL SWIPE WATCH UI (PAGE 1: CLOCK & COUNTERS | PAGE 2: MODE A CONTROLS & RAW INSPECTOR) */}
-                  <div className="w-full h-full flex flex-col items-center justify-between py-6 text-center">
+                  {/* LAYER 1: 2-PAGE HORIZONTAL SWIPE WATCH UI OPTIMIZED FOR ONEPLUS WATCH 2R (466x466 ROUND) */}
+                  <div className="relative w-full h-full flex items-center justify-center text-center">
                     {watchPage === 0 ? (
-                      /* PAGE 1: GLANCEABLE DIGITAL CLOCK + MISSED CALLS + MESSAGES + CLEAR COUNTS */
-                      <div className="flex-1 w-full flex flex-col items-center justify-center space-y-2">
-                        <div className="w-[62%] text-[9.5px] font-mono text-emerald-400 truncate">
+                      /* PAGE 1: CLEAN CURVED LAYOUT (CENTERED DIGITAL CLOCK + COMPACT STATUS CHIPS + CLEAR COUNTS PILL) */
+                      <div className="w-[78%] flex flex-col items-center justify-center space-y-2 py-7">
+                        {/* Compact Top Connection Pill inside safe upper chord */}
+                        <div className="max-w-[76%] px-2.5 py-0.5 rounded-full bg-[#0B1520] border border-slate-800 text-[9.5px] font-mono font-bold text-emerald-400 truncate">
                           ● {watchState.includes('Bonded') ? 'CONNECTED • iPhone' : watchState}
                         </div>
 
-                        <div className="text-4xl font-bold text-white font-display tracking-tight tabular-nums leading-none">
-                          10:26
-                        </div>
-                        <div className="text-[11px] text-slate-400">
-                          Mon, Oct 26
+                        {/* Centered Digital Clock & Date in widest 466px equatorial zone */}
+                        <div className="pt-0.5">
+                          <div className="text-[42px] font-bold text-white font-display tracking-tight tabular-nums leading-none">
+                            10:26
+                          </div>
+                          <div className="text-[11px] text-slate-400 mt-1">
+                            Mon, Oct 26
+                          </div>
                         </div>
 
-                        {/* Missed Calls & Messages Counter Badges */}
-                        <div className="w-[76%] grid grid-cols-2 gap-2 pt-1">
+                        {/* Compact Horizontal Status Chips ([0 Missed] [0 Msgs]) */}
+                        <div className="w-[88%] grid grid-cols-2 gap-2 pt-0.5">
                           <button
                             onClick={() =>
                               watchAlerts.length > 0 &&
                               setActiveWatchPopupUid(watchAlerts[0].notificationUid)
                             }
-                            className="py-1.5 px-2 rounded-xl bg-[#1F1218] border border-rose-800/80 text-[11px] font-bold text-rose-300 truncate cursor-pointer"
+                            className="py-1.5 px-2.5 rounded-full bg-[#1F1218] border border-rose-800/80 text-[11px] font-bold text-rose-300 truncate cursor-pointer hover:border-rose-600 transition-colors"
                           >
                             {watchAlerts.filter((a) => a.categoryId === 1 || a.categoryId === 2).length} Missed
                           </button>
@@ -1073,18 +1077,20 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                               watchAlerts.length > 0 &&
                               setActiveWatchPopupUid(watchAlerts[0].notificationUid)
                             }
-                            className="py-1.5 px-2 rounded-xl bg-[#0F1B29] border border-sky-700/80 text-[11px] font-bold text-sky-300 truncate cursor-pointer"
+                            className="py-1.5 px-2.5 rounded-full bg-[#0F1B29] border border-sky-700/80 text-[11px] font-bold text-sky-300 truncate cursor-pointer hover:border-sky-500 transition-colors"
                           >
                             {watchAlerts.filter((a) => a.categoryId !== 1 && a.categoryId !== 2).length} Msgs
                           </button>
                         </div>
 
-                        <div className="w-[74%] text-[9.5px] text-slate-400 truncate">
+                        {/* Last alert preview line */}
+                        <div className="w-[84%] text-[9.5px] text-slate-400 truncate">
                           {watchAlerts[0]
                             ? `${watchAlerts[0].appDisplayName}: ${watchAlerts[0].title} — ${watchAlerts[0].message}`
-                            : 'No unread alerts'}
+                            : 'Tap chip to view last alert'}
                         </div>
 
+                        {/* Compact Centered Clear Counts Pill (sits comfortably above bottom bezel curve) */}
                         <motion.button
                           whileHover={{ scale: 1.03 }}
                           whileTap={{ scale: 0.95 }}
@@ -1093,18 +1099,21 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                             setActiveWatchPopupUid(null);
                             showWatchToast('Cleared All Counts');
                           }}
-                          className="w-[46%] h-7 rounded-lg bg-[#1E293B] hover:bg-[#273549] border border-slate-600 text-[10px] font-semibold text-white cursor-pointer"
+                          className="px-5 h-7 rounded-full bg-[#1E293B] hover:bg-[#273549] border border-slate-600 text-[10px] font-semibold text-white cursor-pointer shadow-sm"
                         >
                           Clear Counts
                         </motion.button>
                       </div>
                     ) : (
-                      /* PAGE 2: SWIPE SIDE -> MODE A ADVERTISE ONLY + RE-SYNC + TEST ALERT + RAW ANCS INSPECTOR */
-                      <div className="flex-1 w-full flex flex-col items-center justify-center space-y-1.5 px-8">
-                        <div className="text-[10px] font-mono font-bold text-sky-400">
+                      /* PAGE 2: CENTER-WEIGHTED SCROLL WITH GENEROUS CIRCULAR TOP & BOTTOM PADDING */
+                      <div className="w-full h-full overflow-y-auto pt-16 pb-20 px-9 flex flex-col items-center space-y-2">
+                        <div className="text-[10px] font-mono font-bold text-sky-400 shrink-0">
                           CONTROLS • MODE A
                         </div>
-                        <div className="text-[9px] font-mono text-slate-400 truncate">
+                        <div className="text-[9.5px] font-bold text-emerald-400 shrink-0">
+                          {watchState.includes('Bonded') ? 'CONNECTED • ALWAYS-ON' : watchState}
+                        </div>
+                        <div className="text-[9px] font-mono text-slate-400 truncate shrink-0">
                           Src:{watchAlerts.length} • 0x03:{watchAlerts.length} • HB:14 • -54dBm
                         </div>
 
@@ -1113,20 +1122,20 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                           whileHover={{ scale: 1.02 }}
                           whileTap={{ scale: 0.96 }}
                           onClick={handleStartPeripheralMode}
-                          className="w-[82%] h-8 rounded-lg bg-sky-600 hover:bg-sky-500 border border-sky-400 text-[10.5px] font-semibold text-white flex items-center justify-center gap-1.5 cursor-pointer shadow"
+                          className="w-full h-8 rounded-full bg-sky-600 hover:bg-sky-500 border border-sky-400 text-[10.5px] font-semibold text-white flex items-center justify-center gap-1.5 cursor-pointer shadow shrink-0"
                         >
                           <Bluetooth className="w-3.5 h-3.5 text-white shrink-0" />
                           <span>Advertise iPhone (Mode A)</span>
                         </motion.button>
 
                         {/* Re-Sync & Test Alert Row */}
-                        <div className="w-[82%] grid grid-cols-2 gap-1.5">
+                        <div className="w-full grid grid-cols-2 gap-1.5 shrink-0">
                           <button
                             onClick={() => {
                               setWatchState('Bonded - Listening to ANCS');
                               showWatchToast('Re-Synced ANCS');
                             }}
-                            className="h-7 rounded-lg bg-teal-700 hover:bg-teal-600 border border-teal-400/60 text-[10px] font-semibold text-white cursor-pointer"
+                            className="h-7 rounded-full bg-teal-700 hover:bg-teal-600 border border-teal-400/60 text-[10px] font-semibold text-white cursor-pointer"
                           >
                             Re-Sync
                           </button>
@@ -1145,14 +1154,14 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                                   'Hey! Full 256-byte ANCS Attribute 0x03 message body + Contact Name resolved cleanly!',
                               })
                             }
-                            className="h-7 rounded-lg bg-indigo-600 hover:bg-indigo-500 border border-indigo-400/60 text-[10px] font-semibold text-white cursor-pointer"
+                            className="h-7 rounded-full bg-indigo-600 hover:bg-indigo-500 border border-indigo-400/60 text-[10px] font-semibold text-white cursor-pointer"
                           >
                             Test Alert
                           </button>
                         </div>
 
                         {/* Raw ANCS Attribute Inspector */}
-                        <div className="w-[82%] p-2 rounded-lg bg-[#111827] border border-slate-800 text-left text-[8.5px] font-mono text-slate-200 leading-tight space-y-0.5">
+                        <div className="w-full p-2.5 rounded-xl bg-[#111827] border border-slate-800 text-left text-[8.5px] font-mono text-slate-200 leading-tight space-y-0.5 shrink-0">
                           <div className="text-sky-400 font-bold">RAW ANCS INSPECTOR</div>
                           <div className="truncate">
                             App(0x00): {watchAlerts[0]?.appBundleId || '—'}
@@ -1170,18 +1179,22 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                       </div>
                     )}
 
-                    {/* Bottom Page Indicator Dots (Tap to Toggle Page 1 Clock <-> Page 2 Controls) */}
+                    {/* SUBTLE SIDE ARC DOTS ALONG RIGHT CIRCULAR BEZEL (Replaces bottom clipped text footer) */}
                     <button
                       onClick={() => setWatchPage((prev) => (prev === 0 ? 1 : 0))}
-                      className="flex flex-col items-center gap-0.5 cursor-pointer group pt-1"
+                      title={watchPage === 0 ? 'Switch to Page 2: Controls & Raw ANCS Inspector' : 'Switch to Page 1: Clock & Counters'}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-1.5 px-1.5 py-2.5 rounded-full bg-[#0D131F]/90 border border-slate-800 hover:border-sky-500/50 cursor-pointer transition-colors"
                     >
-                      <div className="flex items-center gap-2 text-xs">
-                        <span className={watchPage === 0 ? 'text-sky-400' : 'text-slate-600'}>●</span>
-                        <span className={watchPage === 1 ? 'text-sky-400' : 'text-slate-600'}>●</span>
-                      </div>
-                      <span className="text-[8.5px] font-mono text-slate-400 group-hover:text-sky-300">
-                        {watchPage === 0 ? 'Swipe / Tap for Controls →' : '← Swipe / Tap for Clock'}
-                      </span>
+                      <span
+                        className={`w-2 h-2 rounded-full transition-colors ${
+                          watchPage === 0 ? 'bg-sky-400 shadow-[0_0_6px_#38bdf8]' : 'bg-zinc-600'
+                        }`}
+                      />
+                      <span
+                        className={`w-2 h-2 rounded-full transition-colors ${
+                          watchPage === 1 ? 'bg-sky-400 shadow-[0_0_6px_#38bdf8]' : 'bg-zinc-600'
+                        }`}
+                      />
                     </button>
                   </div>
                 </div>

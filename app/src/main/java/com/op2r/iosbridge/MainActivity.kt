@@ -57,18 +57,17 @@ class MainActivity : ComponentActivity() {
     private var currentPageIndex: Int = 0
     private lateinit var page1ClockContainer: LinearLayout
     private lateinit var page2ControlsScroll: ScrollView
-    private lateinit var pageDot1View: TextView
-    private lateinit var pageDot2View: TextView
-    private lateinit var pageHintView: TextView
+    private lateinit var pageDot1View: View
+    private lateinit var pageDot2View: View
 
-    // Page 1 Views (Glanceable Clock + Missed Calls + Messages + Clear Button)
+    // Page 1 Views (Clean Curved Layout: Centered Clock + Compact Status Chips + Clear Pill)
     private lateinit var page1ConnectionPill: TextView
     private lateinit var page1MissedCallsBadge: TextView
     private lateinit var page1MessagesBadge: TextView
     private lateinit var page1LastPreviewText: TextView
     private lateinit var page1ClearButton: Button
 
-    // Page 2 Views (Controls + Raw ANCS Attribute Inspector + Logs)
+    // Page 2 Views (Center-Weighted Scroll Controls + Raw ANCS Attribute Inspector + Logs)
     private lateinit var statusBadgeView: TextView
     private lateinit var deviceInfoView: TextView
     private lateinit var telemetryStatsView: TextView
@@ -163,7 +162,7 @@ class MainActivity : ComponentActivity() {
                     if (e1 == null) return false
                     val deltaX = e2.x - e1.x
                     val deltaY = e2.y - e1.y
-                    if (abs(deltaX) > abs(deltaY) && abs(deltaX) > dp(38) && abs(velocityX) > 180f) {
+                    if (abs(deltaX) > abs(deltaY) && abs(deltaX) > dp(34) && abs(velocityX) > 160f) {
                         if (deltaX < 0 && currentPageIndex == 0) {
                             switchToPage(1)
                             return true
@@ -183,15 +182,13 @@ class MainActivity : ComponentActivity() {
         if (currentPageIndex == 0) {
             page1ClockContainer.visibility = View.VISIBLE
             page2ControlsScroll.visibility = View.GONE
-            pageDot1View.setTextColor(Color.parseColor("#38BDF8"))
-            pageDot2View.setTextColor(Color.parseColor("#52525B"))
-            pageHintView.text = "Swipe Left for Controls"
+            pageDot1View.background = createCircleDotDrawable("#38BDF8")
+            pageDot2View.background = createCircleDotDrawable("#3F3F46")
         } else {
             page1ClockContainer.visibility = View.GONE
             page2ControlsScroll.visibility = View.VISIBLE
-            pageDot1View.setTextColor(Color.parseColor("#52525B"))
-            pageDot2View.setTextColor(Color.parseColor("#38BDF8"))
-            pageHintView.text = "Swipe Right for Clock"
+            pageDot1View.background = createCircleDotDrawable("#3F3F46")
+            pageDot2View.background = createCircleDotDrawable("#38BDF8")
         }
     }
 
@@ -214,49 +211,58 @@ class MainActivity : ComponentActivity() {
     private fun buildCircularTwoPageWatchLayout(): View {
         val metrics = resources.displayMetrics
         val screenMinPx = minOf(metrics.widthPixels, metrics.heightPixels)
-        val inscribedInsetPx = (screenMinPx * 0.1465f).toInt().coerceAtLeast(dp(26))
+        // Safe chord width (80% of 466px diameter = ~372px / 186dp) for equatorial elements
+        val safeCenterWidthPx = (screenMinPx * 0.78f).toInt().coerceAtLeast(dp(176))
+        val safeHorizontalPaddingPx = ((screenMinPx - safeCenterWidthPx) / 2).coerceAtLeast(dp(26))
 
         val rootFrame = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
         }
 
         // =====================================================================
-        // PAGE 1: MINIMAL DIGITAL CLOCK + MISSED CALLS + MESSAGES + CLEAR BUTTON
+        // PAGE 1: ONEPLUS WATCH 2R CLEAN CURVED CLOCK & COMPACT STATUS CHIPS
+        // Centered vertically in the wide 466px equatorial zone so neither the
+        // top status pill nor the bottom Clear Counts button clips on the bezel.
         // =====================================================================
         page1ClockContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(
-                inscribedInsetPx,
-                inscribedInsetPx - dp(6),
-                inscribedInsetPx,
-                inscribedInsetPx + dp(18)
+                safeHorizontalPaddingPx,
+                dp(28),
+                safeHorizontalPaddingPx,
+                dp(28)
             )
         }
 
         page1ConnectionPill = TextView(this).apply {
-            text = "● STARTING ANCS..."
+            text = "● STARTING ANCS"
             setTextColor(Color.parseColor("#10B981"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             gravity = Gravity.CENTER
-            setPadding(dp(8), dp(2), dp(8), dp(2))
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            background = createRoundedDrawable("#0B1520", "#1E293B", dp(12))
+            setPadding(dp(10), dp(3), dp(10), dp(3))
         }
 
         val digitalClock = TextClock(this).apply {
             format12Hour = "hh:mm"
             format24Hour = "HH:mm"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 36f)
-            typeface = Typeface.create("sans-serif-light", Typeface.BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 44f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             gravity = Gravity.CENTER
+            includeFontPadding = false
+            setPadding(0, dp(2), 0, 0)
         }
 
         val dateClock = TextClock(this).apply {
             format12Hour = "EEE, MMM d"
             format24Hour = "EEE, MMM d"
-            setTextColor(Color.parseColor("#9CA3AF"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextColor(Color.parseColor("#94A3B8"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, dp(6))
         }
@@ -264,7 +270,7 @@ class MainActivity : ComponentActivity() {
         val countersRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(2), 0, dp(6))
+            setPadding(0, dp(2), 0, dp(4))
         }
 
         page1MissedCallsBadge = TextView(this).apply {
@@ -273,8 +279,9 @@ class MainActivity : ComponentActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundedDrawable("#1F1218", "#881337", dp(12))
-            setPadding(dp(8), dp(6), dp(8), dp(6))
+            maxLines = 1
+            background = createRoundedDrawable("#1F1218", "#881337", dp(14))
+            setPadding(dp(10), dp(5), dp(10), dp(5))
             setOnClickListener {
                 val last = AncsBridgeService.bridgeState.value.lastNotification
                 if (last != null) showNotificationPopupCard(last)
@@ -287,8 +294,9 @@ class MainActivity : ComponentActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createRoundedDrawable("#0F1B29", "#0369A1", dp(12))
-            setPadding(dp(8), dp(6), dp(8), dp(6))
+            maxLines = 1
+            background = createRoundedDrawable("#0F1B29", "#0369A1", dp(14))
+            setPadding(dp(10), dp(5), dp(10), dp(5))
             setOnClickListener {
                 val last = AncsBridgeService.bridgeState.value.lastNotification
                 if (last != null) showNotificationPopupCard(last)
@@ -309,13 +317,13 @@ class MainActivity : ComponentActivity() {
         )
 
         page1LastPreviewText = TextView(this).apply {
-            text = "No unread alerts"
-            setTextColor(Color.parseColor("#A1A1AA"))
+            text = "Tap chip to view last alert"
+            setTextColor(Color.parseColor("#71717A"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
             gravity = Gravity.CENTER
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            setPadding(dp(4), 0, dp(4), dp(6))
+            setPadding(dp(6), 0, dp(6), dp(4))
             setOnClickListener {
                 val last = AncsBridgeService.bridgeState.value.lastNotification
                 if (last != null) showNotificationPopupCard(last)
@@ -324,52 +332,69 @@ class MainActivity : ComponentActivity() {
 
         page1ClearButton = createWatchActionButton(
             label = "Clear Counts",
-            bgColorHex = "#1E293B"
+            bgColorHex = "#1E293B",
+            cornerRadiusDp = 14
         ) {
             startBridgeService(AncsBridgeService.ACTION_CLEAR_COUNTERS)
         }
 
-        page1ClockContainer.addView(page1ConnectionPill)
+        page1ClockContainer.addView(
+            page1ConnectionPill,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
         page1ClockContainer.addView(digitalClock)
         page1ClockContainer.addView(dateClock)
         page1ClockContainer.addView(
             countersRow,
             LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
+                safeCenterWidthPx.coerceAtMost(dp(168)),
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
-        page1ClockContainer.addView(page1LastPreviewText)
+        page1ClockContainer.addView(
+            page1LastPreviewText,
+            LinearLayout.LayoutParams(
+                safeCenterWidthPx.coerceAtMost(dp(164)),
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
         page1ClockContainer.addView(
             page1ClearButton,
-            LinearLayout.LayoutParams(dp(116), dp(30))
+            LinearLayout.LayoutParams(dp(112), dp(28))
         )
 
         // =====================================================================
-        // PAGE 2: SWIPE SIDE -> CONTROLS (MODE A ONLY) + RAW ATTRIBUTE LOGS
+        // PAGE 2: CENTER-WEIGHTED SCROLL FOR 466x466 ROUND DISPLAY
+        // Generous top (72dp) & bottom (80dp) circular padding with clipToPadding=false
+        // so the top header and bottom Raw ANCS Inspector scroll smoothly into the
+        // wide center equator without ever clipping against the curved bezel.
         // =====================================================================
         page2ControlsScroll = ScrollView(this).apply {
             setBackgroundColor(Color.BLACK)
-            isFillViewport = true
+            isFillViewport = false
             isVerticalScrollBarEnabled = false
+            clipToPadding = false
+            setPadding(
+                safeHorizontalPaddingPx,
+                dp(72),
+                safeHorizontalPaddingPx,
+                dp(80)
+            )
             visibility = View.GONE
         }
 
         val page2Container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(
-                inscribedInsetPx,
-                inscribedInsetPx - dp(4),
-                inscribedInsetPx,
-                inscribedInsetPx + dp(26)
-            )
         }
 
         val headerTitle = TextView(this).apply {
             text = "CONTROLS • MODE A"
             setTextColor(Color.parseColor("#38BDF8"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             gravity = Gravity.CENTER
         }
@@ -377,7 +402,7 @@ class MainActivity : ComponentActivity() {
         statusBadgeView = TextView(this).apply {
             text = "INITIALIZING..."
             setTextColor(Color.parseColor("#10B981"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setPadding(dp(4), dp(2), dp(4), dp(2))
@@ -396,12 +421,13 @@ class MainActivity : ComponentActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
             typeface = Typeface.MONOSPACE
             gravity = Gravity.CENTER
-            setPadding(0, dp(1), 0, dp(5))
+            setPadding(0, dp(1), 0, dp(6))
         }
 
         val advertiseModeAButton = createWatchActionButton(
             label = "Advertise iPhone (Mode A)",
-            bgColorHex = "#0284C7"
+            bgColorHex = "#0284C7",
+            cornerRadiusDp = 14
         ) {
             startBridgeService(AncsBridgeService.ACTION_START_MODE_A_PERIPHERAL)
         }
@@ -409,19 +435,21 @@ class MainActivity : ComponentActivity() {
         val diagRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(4), 0, dp(6))
+            setPadding(0, dp(5), 0, dp(6))
         }
 
         val resyncButton = createWatchActionButton(
             label = "Re-Sync",
-            bgColorHex = "#0F766E"
+            bgColorHex = "#0F766E",
+            cornerRadiusDp = 12
         ) {
             startBridgeService(AncsBridgeService.ACTION_RESYNC_ANCS)
         }
 
         val testAlertButton = createWatchActionButton(
             label = "Test Alert",
-            bgColorHex = "#4F46E5"
+            bgColorHex = "#4F46E5",
+            cornerRadiusDp = 12
         ) {
             startBridgeService(AncsBridgeService.ACTION_SIMULATE_TEST_ALERT)
         }
@@ -439,8 +467,8 @@ class MainActivity : ComponentActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
             typeface = Typeface.MONOSPACE
             gravity = Gravity.START
-            background = createRoundedDrawable("#111827", "#1E293B", dp(10))
-            setPadding(dp(8), dp(6), dp(8), dp(6))
+            background = createRoundedDrawable("#111827", "#1E293B", dp(12))
+            setPadding(dp(10), dp(7), dp(10), dp(7))
         }
 
         logFeedView = TextView(this).apply {
@@ -488,47 +516,37 @@ class MainActivity : ComponentActivity() {
         page2ControlsScroll.addView(page2Container)
 
         // =====================================================================
-        // BOTTOM PAGE INDICATOR DOTS (TAP OR SWIPE TO SWITCH PAGES)
+        // SUBTLE SIDE ARC DOTS (RIGHT BEZEL EDGE INDICATOR)
+        // Replaces the bottom footer so the bottom circular arc is never clipped.
         // =====================================================================
-        val pagerFooter = LinearLayout(this).apply {
+        val sideArcPagerDots = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(2), 0, dp(8))
+            background = createRoundedDrawable("#0D131F", "#1E293B", dp(10))
+            setPadding(dp(5), dp(8), dp(5), dp(8))
             setOnClickListener {
                 switchToPage(if (currentPageIndex == 0) 1 else 0)
             }
         }
 
-        val dotsRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
+        pageDot1View = View(this).apply {
+            background = createCircleDotDrawable("#38BDF8")
         }
 
-        pageDot1View = TextView(this).apply {
-            text = "●"
-            setTextColor(Color.parseColor("#38BDF8"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(dp(4), 0, dp(4), 0)
+        pageDot2View = View(this).apply {
+            background = createCircleDotDrawable("#3F3F46")
         }
 
-        pageDot2View = TextView(this).apply {
-            text = "●"
-            setTextColor(Color.parseColor("#52525B"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(dp(4), 0, dp(4), 0)
-        }
-
-        pageHintView = TextView(this).apply {
-            text = "Swipe Left for Controls"
-            setTextColor(Color.parseColor("#71717A"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 8.5f)
-            gravity = Gravity.CENTER
-        }
-
-        dotsRow.addView(pageDot1View)
-        dotsRow.addView(pageDot2View)
-        pagerFooter.addView(dotsRow)
-        pagerFooter.addView(pageHintView)
+        sideArcPagerDots.addView(
+            pageDot1View,
+            LinearLayout.LayoutParams(dp(6), dp(6)).apply {
+                bottomMargin = dp(5)
+            }
+        )
+        sideArcPagerDots.addView(
+            pageDot2View,
+            LinearLayout.LayoutParams(dp(6), dp(6))
+        )
 
         rootFrame.addView(
             page1ClockContainer,
@@ -545,15 +563,17 @@ class MainActivity : ComponentActivity() {
             )
         )
         rootFrame.addView(
-            pagerFooter,
+            sideArcPagerDots,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            )
+                Gravity.CENTER_VERTICAL or Gravity.END
+            ).apply {
+                marginEnd = dp(6)
+            }
         )
 
-        popupOverlayContainer = buildCircularInscribedNotificationPopup(inscribedInsetPx)
+        popupOverlayContainer = buildCircularInscribedNotificationPopup(safeHorizontalPaddingPx)
         rootFrame.addView(
             popupOverlayContainer,
             FrameLayout.LayoutParams(
@@ -565,7 +585,7 @@ class MainActivity : ComponentActivity() {
         return rootFrame
     }
 
-    private fun buildCircularInscribedNotificationPopup(inscribedInsetPx: Int): FrameLayout {
+    private fun buildCircularInscribedNotificationPopup(safeHorizontalPaddingPx: Int): FrameLayout {
         val overlay = FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#F5000000"))
             visibility = View.GONE
@@ -577,17 +597,17 @@ class MainActivity : ComponentActivity() {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(
-                inscribedInsetPx,
-                inscribedInsetPx - dp(6),
-                inscribedInsetPx,
-                inscribedInsetPx - dp(6)
+                safeHorizontalPaddingPx,
+                dp(34),
+                safeHorizontalPaddingPx,
+                dp(34)
             )
         }
 
         val cardBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            background = createRoundedDrawable("#111827", "#38BDF8", dp(16))
+            background = createRoundedDrawable("#111827", "#38BDF8", dp(18))
             setPadding(dp(12), dp(10), dp(12), dp(10))
         }
 
@@ -623,7 +643,7 @@ class MainActivity : ComponentActivity() {
         popupSubtitleView = TextView(this).apply {
             text = ""
             setTextColor(Color.parseColor("#38BDF8"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             gravity = Gravity.CENTER
             maxLines = 1
@@ -641,7 +661,7 @@ class MainActivity : ComponentActivity() {
         popupMessageView = TextView(this).apply {
             text = "Full 256-byte ANCS Attribute 0x03 message body..."
             setTextColor(Color.parseColor("#F3F4F6"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setLineSpacing(0f, 1.15f)
             gravity = Gravity.CENTER_HORIZONTAL
         }
@@ -657,41 +677,41 @@ class MainActivity : ComponentActivity() {
         val actionsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(8), 0, 0)
+            setPadding(0, dp(6), 0, 0)
         }
 
-        popupPositiveButton = createWatchActionButton("Accept", "#059669") {
+        popupPositiveButton = createWatchActionButton("Accept", "#059669", 12) {
             if (activePopupUid != -1) {
                 sendActionToBridge(AncsBridgeService.ACTION_PERFORM_POSITIVE, activePopupUid)
             }
             popupOverlayContainer.visibility = View.GONE
         }
 
-        popupNegativeButton = createWatchActionButton("Dismiss", "#DC2626") {
+        popupNegativeButton = createWatchActionButton("Dismiss", "#DC2626", 12) {
             if (activePopupUid != -1) {
                 sendActionToBridge(AncsBridgeService.ACTION_PERFORM_NEGATIVE, activePopupUid)
             }
             popupOverlayContainer.visibility = View.GONE
         }
 
-        popupCloseButton = createWatchActionButton("Close", "#374151") {
+        popupCloseButton = createWatchActionButton("Close", "#374151", 12) {
             popupOverlayContainer.visibility = View.GONE
         }
 
         actionsRow.addView(
             popupPositiveButton,
-            LinearLayout.LayoutParams(0, dp(32), 1f).apply { marginEnd = dp(3) }
+            LinearLayout.LayoutParams(0, dp(30), 1f).apply { marginEnd = dp(3) }
         )
         actionsRow.addView(
             popupNegativeButton,
-            LinearLayout.LayoutParams(0, dp(32), 1f).apply {
+            LinearLayout.LayoutParams(0, dp(30), 1f).apply {
                 marginStart = dp(3)
                 marginEnd = dp(3)
             }
         )
         actionsRow.addView(
             popupCloseButton,
-            LinearLayout.LayoutParams(0, dp(32), 0.85f).apply { marginStart = dp(3) }
+            LinearLayout.LayoutParams(0, dp(30), 0.85f).apply { marginStart = dp(3) }
         )
 
         cardBox.addView(popupCategoryBadge)
@@ -702,7 +722,7 @@ class MainActivity : ComponentActivity() {
             messageScroll,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(88)
+                dp(74)
             )
         )
         cardBox.addView(
@@ -901,6 +921,7 @@ class MainActivity : ComponentActivity() {
     private fun createWatchActionButton(
         label: String,
         bgColorHex: String,
+        cornerRadiusDp: Int = 10,
         onClick: () -> Unit
     ): Button {
         return Button(this).apply {
@@ -908,9 +929,16 @@ class MainActivity : ComponentActivity() {
             isAllCaps = false
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            background = createRoundedDrawable(bgColorHex, "#3F3F46", dp(8))
-            setPadding(dp(4), dp(2), dp(4), dp(2))
+            background = createRoundedDrawable(bgColorHex, "#3F3F46", dp(cornerRadiusDp))
+            setPadding(dp(6), dp(2), dp(6), dp(2))
             setOnClickListener { onClick() }
+        }
+    }
+
+    private fun createCircleDotDrawable(fillHex: String): GradientDrawable {
+        return GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.parseColor(fillHex))
         }
     }
 
