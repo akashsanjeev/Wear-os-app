@@ -658,8 +658,8 @@ class AncsBridgeService : Service() {
             gatt.discoverServices()
         }
 
-        override fun onServicesChanged(gatt: BluetoothGatt) {
-            appendLog("GATT services changed — re-subscribing ANCS")
+        override fun onServiceChanged(gatt: BluetoothGatt) {
+            appendLog("GATT service changed — re-subscribing ANCS")
             clearGattQueue()
             gatt.discoverServices()
         }
