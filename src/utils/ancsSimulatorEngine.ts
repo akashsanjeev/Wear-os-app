@@ -7,6 +7,7 @@ export interface SimulatedAncsPreset {
   categoryCount: number;
   appBundleId: string;
   title: string;
+  subtitle: string;
   message: string;
 }
 
@@ -28,6 +29,7 @@ export interface WatchAlertItem {
   appBundleId: string;
   appDisplayName: string;
   title: string;
+  subtitle: string;
   message: string;
   timestamp: string;
   wakeBehavior: 'Screen Wake + Continuous Call Vibe' | 'Screen Wake + Full-Screen Message Card';
@@ -96,8 +98,8 @@ export function buildNotificationSource8BytePacket(
 }
 
 /**
- * Builds the 11-byte Control Point GetNotificationAttributes (0x00) request:
- * [0x00, UID(4B LE), 0x00(AppID), 0x01(Title), 0x40, 0x00(64B), 0x03(Message), 0x00, 0x01(256B)]
+ * Builds the 15-byte Control Point GetNotificationAttributes (0x00) request:
+ * [0x00, UID(4B LE), 0x00(AppID), 0x01(Title), 0x40, 0x00(64B), 0x02(Subtitle/CallerID), 0x40, 0x00(64B), 0x03(Message), 0x00, 0x01(256B)]
  */
 export function buildControlPointGetAttributesRequest(notificationUid: number): Uint8Array {
   return new Uint8Array([
@@ -105,6 +107,9 @@ export function buildControlPointGetAttributesRequest(notificationUid: number): 
     ...writeUint32LE(notificationUid),
     0x00,
     0x01,
+    0x40,
+    0x00,
+    0x02,
     0x40,
     0x00,
     0x03,
@@ -132,12 +137,14 @@ export function buildFragmentedDataSourceChunks(
   notificationUid: number,
   appBundleId: string,
   title: string,
+  subtitle: string,
   message: string,
   mtu: number
 ): Uint8Array[] {
   const encoder = new TextEncoder();
   const appBytes = encoder.encode(appBundleId);
   const titleBytes = encoder.encode(title).slice(0, 64);
+  const subtitleBytes = encoder.encode(subtitle).slice(0, 64);
   const msgBytes = encoder.encode(message).slice(0, 256);
 
   const fullStream: number[] = [
@@ -151,7 +158,11 @@ export function buildFragmentedDataSourceChunks(
     0x01,
     ...writeUint16LE(titleBytes.length),
     ...Array.from(titleBytes),
-    // Attribute 3: Message (0x03) + 2B length LE + UTF-8 bytes
+    // Attribute 2: Subtitle (0x02) + 2B length LE + UTF-8 bytes (Caller ID Phone Number)
+    0x02,
+    ...writeUint16LE(subtitleBytes.length),
+    ...Array.from(subtitleBytes),
+    // Attribute 3: Message (0x03) + 2B length LE + UTF-8 bytes (Full 256B Message Body)
     0x03,
     ...writeUint16LE(msgBytes.length),
     ...Array.from(msgBytes),
@@ -168,14 +179,27 @@ export function buildFragmentedDataSourceChunks(
 export const ANCS_SIMULATOR_PRESETS: SimulatedAncsPreset[] = [
   {
     id: 'whatsapp-msg',
-    label: 'WhatsApp Message (Wakes Screen + Full Message)',
+    label: 'WhatsApp 256B Message (Attribute 0x03 Prioritized)',
     eventId: 0,
     eventFlags: 1 << 3,
     categoryId: 4,
     categoryCount: 3,
     appBundleId: 'net.whatsapp.WhatsApp',
     title: 'Alex Rivera',
-    message: 'Hey! Are we still meeting at 6:30 PM for coffee? Let me know when your OnePlus Watch 2R gets this over BLE ANCS!',
+    subtitle: '+1 (415) 602-9811',
+    message: 'Hey! Are we still meeting at 6:30 PM for coffee? Let me know when your OnePlus Watch 2R gets this full 256-byte ANCS Attribute 0x03 message body over the always-on BLE bridge!',
+  },
+  {
+    id: 'incoming-call',
+    label: 'Incoming iPhone Call + Caller ID (CategoryID = 1)',
+    eventId: 0,
+    eventFlags: (1 << 1) | (1 << 3) | (1 << 4), // Important + PositiveAction + NegativeAction
+    categoryId: 1,
+    categoryCount: 1,
+    appBundleId: 'com.apple.mobilephone',
+    title: 'Sarah Jenkins',
+    subtitle: '+1 (415) 890-4321',
+    message: 'iPhone Cellular Call • Tap Accept (0x00) or Decline (0x01)',
   },
   {
     id: 'imessage-sms',
@@ -185,29 +209,20 @@ export const ANCS_SIMULATOR_PRESETS: SimulatedAncsPreset[] = [
     categoryId: 4,
     categoryCount: 2,
     appBundleId: 'com.apple.MobileSMS',
-    title: '2FA Verification',
+    title: 'Apple ID Security',
+    subtitle: 'SMS Verification',
     message: 'Your Apple ID verification code is 849204. Do not share this code with anyone.',
   },
   {
-    id: 'incoming-call',
-    label: 'Incoming iPhone Call (CategoryID = 1)',
-    eventId: 0,
-    eventFlags: (1 << 1) | (1 << 3) | (1 << 4), // Important + PositiveAction + NegativeAction
-    categoryId: 1,
-    categoryCount: 1,
-    appBundleId: 'com.apple.mobilephone',
-    title: 'Sarah Jenkins (Mobile)',
-    message: '+1 (415) 890-4321 · Incoming iPhone Call',
-  },
-  {
     id: 'pre-existing-alert',
-    label: 'Pre-Existing iOS Alert (EventFlag 1<<2)',
+    label: 'Pre-Existing iOS Alert (EventFlag 1<<2 Filtered on Sync)',
     eventId: 0,
     eventFlags: 1 << 2, // PreExisting flag set
     categoryId: 6,
     categoryCount: 5,
     appBundleId: 'com.google.Gmail',
     title: 'GitHub Actions CI',
-    message: '[OP2R-iOS-Bridge] Workflow run build-apk succeeded in 1m 42s (Pre-existing alert).',
+    subtitle: 'akashsanjeev/Wear-os-app',
+    message: '[OP2R-iOS-Bridge] Workflow run build-apk succeeded and published OP2R-iOS-Bridge-WearOS5.apk.',
   },
 ];

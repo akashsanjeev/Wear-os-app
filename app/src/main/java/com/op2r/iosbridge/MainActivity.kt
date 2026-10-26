@@ -1,21 +1,15 @@
 package com.op2r.iosbridge
 
 import android.Manifest
-import android.annotation.SuppressLint
-import android.app.NotificationManager
-import android.content.BroadcastReceiver
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
-import android.provider.Settings
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
@@ -29,137 +23,293 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.launch
 
 /**
- * Wear OS 5.0 (Android 14 / API 34) Circular-Inscribed UI Activity custom-engineered
- * for the OnePlus Watch 2R (OPWWE234 — 1.43" AMOLED, 466x466 px, 233x233 dp).
+ * Wear OS 5.0 (API 34) Round Watch Activity for OnePlus Watch 2R (OPWWE234 - 466x466 px).
  *
- * Uses circular chord tapering (52% -> 68% -> 82% -> 76% -> 64%) so every pill button,
- * live NS/DS packet counter, and the Full-Screen Notification Message Popup Card fit
- * strictly inside the round bezel with zero clipping.
+ * Uses circular chord geometry:
+ * - Inscribed safe square padding (~14.64% = 68px on a 466x466 display) so zero text or buttons
+ *   clip against the round AMOLED bezel.
+ * - Includes an interactive full-screen Notification & Incoming Call Popup Overlay that displays:
+ *   1. Caller Name (Attribute 0x01 Title) + Caller Phone Number (Attribute 0x02 Subtitle)
+ *      with Answer (Positive Action 0x00) and Decline (Negative Action 0x01) buttons.
+ *   2. Full 256-byte Message Body (Attribute 0x03) inside an inscribed scrollable card.
  */
 class MainActivity : ComponentActivity() {
 
-    private lateinit var telemetryHeaderView: TextView
-    private lateinit var statusTextView: TextView
-    private lateinit var preExistingToggleBtn: Button
+    private lateinit var statusBadgeView: TextView
+    private lateinit var deviceInfoView: TextView
+    private lateinit var telemetryStatsView: TextView
+    private lateinit var lastAlertSummaryView: TextView
+    private lateinit var logFeedView: TextView
 
-    // Circular-Inscribed Full-Screen Notification Message Popup Overlay Views
-    private lateinit var popupOverlayRoot: FrameLayout
-    private lateinit var popupAppBadgeView: TextView
+    // Full-screen circular popup overlay views
+    private lateinit var popupOverlayContainer: FrameLayout
+    private lateinit var popupCategoryBadge: TextView
+    private lateinit var popupAppNameView: TextView
     private lateinit var popupTitleView: TextView
+    private lateinit var popupSubtitleView: TextView
     private lateinit var popupMessageView: TextView
-    private lateinit var popupCallActionsRow: LinearLayout
-    private lateinit var popupDismissBtn: Button
+    private lateinit var popupPositiveButton: Button
+    private lateinit var popupNegativeButton: Button
+    private lateinit var popupCloseButton: Button
 
-    private var activePopupNotificationUid: Int = -1
-    private var ignorePreExisting = true
-    private var isReceiverRegistered = false
+    private var activePopupUid: Int = -1
+    private var lastShownPopupSignature: String = ""
+
+    private val requiredPermissions: Array<String>
+        get() = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(Manifest.permission.BLUETOOTH_SCAN)
+                add(Manifest.permission.BLUETOOTH_CONNECT)
+                add(Manifest.permission.BLUETOOTH_ADVERTISE)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }.toTypedArray()
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { _ ->
-        startAndBindForegroundBridgeService()
-        promptBatteryOptimizationsOnFirstLaunch()
-    }
-
-    private val bridgeReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            when (intent.action) {
-                AncsBridgeService.ACTION_STATE_BROADCAST -> {
-                    val state = intent.getStringExtra(AncsBridgeService.EXTRA_CONNECTION_STATE)
-                        ?: AncsBridgeService.currentStatusText
-                    ignorePreExisting = intent.getBooleanExtra(
-                        AncsBridgeService.EXTRA_IGNORE_PRE_EXISTING,
-                        ignorePreExisting
-                    )
-                    val nsCount = intent.getIntExtra(
-                        AncsBridgeService.EXTRA_NS_COUNT,
-                        AncsBridgeService.nsPacketCount
-                    )
-                    val dsCount = intent.getIntExtra(
-                        AncsBridgeService.EXTRA_DS_COUNT,
-                        AncsBridgeService.dsPacketCount
-                    )
-                    updateWatchUiState(state, nsCount, dsCount)
-                }
-
-                AncsBridgeService.ACTION_NEW_NOTIFICATION_BROADCAST -> {
-                    handleIncomingNotificationIntent(intent)
-                }
-
-                AncsBridgeService.ACTION_DISMISS_NOTIFICATION_BROADCAST -> {
-                    val dismissedUid = intent.getIntExtra(AncsBridgeService.EXTRA_NOTIFICATION_UID, -1)
-                    if (dismissedUid == activePopupNotificationUid) {
-                        hideFullScreenMessagePopup()
-                    }
-                }
-            }
+    ) { results ->
+        val allGranted = results.values.all { it }
+        if (allGranted) {
+            startBridgeService(AncsBridgeService.ACTION_START_MODE_A_PERIPHERAL)
+        } else {
+            statusBadgeView.text = "BLE PERMISSIONS REQUIRED"
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // Ensure Wear OS 5.0 wakes the OnePlus Watch 2R display over ambient/lockscreen
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
-        }
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        val prefs = getSharedPreferences(AncsBridgeService.PREFS_NAME, Context.MODE_PRIVATE)
-        ignorePreExisting = prefs.getBoolean(AncsBridgeService.PREF_IGNORE_PRE_EXISTING, true)
-
-        setContentView(buildRootWatchLayout())
-        requestRequiredBleAndNotificationPermissions()
-        handleIncomingNotificationIntent(intent)
+        enableWakeAndShowWhenLocked()
+        setContentView(buildCircularSafeWatchLayout())
+        observeBridgeState()
+        ensurePermissionsAndStartBridge()
+        handleIncomingPopupIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleIncomingNotificationIntent(intent)
+        handleIncomingPopupIntent(intent)
     }
 
-    override fun onResume() {
-        super.onResume()
-        registerBridgeBroadcastReceiver()
-        updateWatchUiState(
-            AncsBridgeService.currentStatusText,
-            AncsBridgeService.nsPacketCount,
-            AncsBridgeService.dsPacketCount
-        )
+    private fun enableWakeAndShowWhenLocked() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+            val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+            km?.requestDismissKeyguard(this, null)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+        }
     }
 
-    override fun onPause() {
-        unregisterBridgeBroadcastReceiver()
-        super.onPause()
-    }
+    /**
+     * Builds the root FrameLayout containing:
+     * 1. The scrollable circular-safe ANCS Bridge dashboard.
+     * 2. The full-screen circular-inscribed Message & Caller ID Popup Overlay.
+     */
+    private fun buildCircularSafeWatchLayout(): View {
+        val metrics = resources.displayMetrics
+        val screenMinPx = minOf(metrics.widthPixels, metrics.heightPixels)
+        // Inscribed square margin for a circle: (1 - sqrt(2)/2) / 2 ≈ 0.14645 of diameter
+        val inscribedInsetPx = (screenMinPx * 0.1465f).toInt().coerceAtLeast(dp(26))
 
-    private fun buildRootWatchLayout(): FrameLayout {
         val rootFrame = FrameLayout(this).apply {
-            setBackgroundColor(Color.parseColor("#05070B"))
+            setBackgroundColor(Color.BLACK)
         }
 
-        // Layer 1: Single-Screen Circular-Safe Control Deck for OnePlus Watch 2R (466x466)
-        rootFrame.addView(
-            buildCircularSafeControlDeck(),
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                Gravity.CENTER
+        val scrollRoot = ScrollView(this).apply {
+            setBackgroundColor(Color.BLACK)
+            isFillViewport = true
+            isVerticalScrollBarEnabled = false
+        }
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(
+                inscribedInsetPx,
+                inscribedInsetPx,
+                inscribedInsetPx,
+                inscribedInsetPx + dp(18)
+            )
+        }
+
+        val headerTitle = TextView(this).apply {
+            text = "OP2R • iOS ANCS"
+            setTextColor(Color.parseColor("#38BDF8"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            gravity = Gravity.CENTER
+        }
+
+        statusBadgeView = TextView(this).apply {
+            text = "INITIALIZING..."
+            setTextColor(Color.parseColor("#10B981"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(4), dp(8), dp(2))
+        }
+
+        deviceInfoView = TextView(this).apply {
+            text = "No iPhone Connected • MTU 23"
+            setTextColor(Color.parseColor("#A1A1AA"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(2))
+        }
+
+        telemetryStatsView = TextView(this).apply {
+            text = "RX Src: 0 • Data(0x03): 0 • HB: 0"
+            setTextColor(Color.parseColor("#38BDF8"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+            typeface = Typeface.MONOSPACE
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(6))
+        }
+
+        // Primary Mode A / Mode B Controls
+        val modeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        val modeAButton = createWatchActionButton(
+            label = "Advertise (A)",
+            bgColorHex = "#0284C7"
+        ) {
+            startBridgeService(AncsBridgeService.ACTION_START_MODE_A_PERIPHERAL)
+        }
+
+        val modeBButton = createWatchActionButton(
+            label = "Scan iOS (B)",
+            bgColorHex = "#27272A"
+        ) {
+            startBridgeService(AncsBridgeService.ACTION_START_MODE_B_CENTRAL)
+        }
+
+        modeRow.addView(modeAButton, LinearLayout.LayoutParams(0, dp(32), 1f).apply {
+            marginEnd = dp(4)
+        })
+        modeRow.addView(modeBButton, LinearLayout.LayoutParams(0, dp(32), 1f).apply {
+            marginStart = dp(4)
+        })
+
+        // Secondary Diagnostic Controls: Re-Sync ANCS + Test Alert Popup
+        val diagRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(5), 0, dp(6))
+        }
+
+        val resyncButton = createWatchActionButton(
+            label = "Re-Sync ANCS",
+            bgColorHex = "#0F766E"
+        ) {
+            startBridgeService(AncsBridgeService.ACTION_RESYNC_ANCS)
+        }
+
+        val testAlertButton = createWatchActionButton(
+            label = "Test Alert",
+            bgColorHex = "#4F46E5"
+        ) {
+            startBridgeService(AncsBridgeService.ACTION_SIMULATE_TEST_ALERT)
+        }
+
+        diagRow.addView(resyncButton, LinearLayout.LayoutParams(0, dp(30), 1f).apply {
+            marginEnd = dp(4)
+        })
+        diagRow.addView(testAlertButton, LinearLayout.LayoutParams(0, dp(30), 1f).apply {
+            marginStart = dp(4)
+        })
+
+        lastAlertSummaryView = TextView(this).apply {
+            text = "Waiting for iPhone calls & notifications..."
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+            gravity = Gravity.CENTER
+            background = createRoundedDrawable("#18181B", "#27272A", dp(10))
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            setOnClickListener {
+                val last = AncsBridgeService.bridgeState.value.lastNotification
+                if (last != null) {
+                    showNotificationPopupCard(last)
+                }
+            }
+        }
+
+        logFeedView = TextView(this).apply {
+            text = "GATT Telemetry Ready"
+            setTextColor(Color.parseColor("#71717A"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+            typeface = Typeface.MONOSPACE
+            gravity = Gravity.START
+            setPadding(dp(4), dp(6), dp(4), dp(4))
+        }
+
+        container.addView(headerTitle)
+        container.addView(statusBadgeView)
+        container.addView(deviceInfoView)
+        container.addView(telemetryStatsView)
+        container.addView(
+            modeRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        container.addView(
+            diagRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        container.addView(
+            lastAlertSummaryView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        container.addView(
+            logFeedView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
-        // Layer 2: Circular-Inscribed Full-Screen Notification Message Popup Card
-        popupOverlayRoot = buildCircularInscribedNotificationPopup()
+        scrollRoot.addView(container)
         rootFrame.addView(
-            popupOverlayRoot,
+            scrollRoot,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        // Full-Screen Inscribed Notification & Incoming Call Popup Overlay
+        popupOverlayContainer = buildCircularInscribedNotificationPopup(inscribedInsetPx)
+        rootFrame.addView(
+            popupOverlayContainer,
+            FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
-                Gravity.CENTER
+                FrameLayout.LayoutParams.MATCH_PARENT
             )
         )
 
@@ -167,259 +317,96 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Builds the Single-Screen Circular-Safe Layout proportioned specifically for the
-     * OnePlus Watch 2R (466x466 px / 233x233 dp) using tapered chord widths:
-     * - Top Header + Live NS/DS Telemetry: 54% width
-     * - Interactive Status & Re-Sync Pill: 68% width
-     * - Primary Mode A / Mode B Row (Equator): 82% width (2 columns)
-     * - Pre-Existing Toggle Pill: 76% width
-     * - Utility Test Alert / Reset Row (Lower Arc): 64% width (2 columns)
+     * Builds the full-screen circular-safe Notification & Caller ID Popup Overlay.
+     * - Displays Caller Name (Title 0x01) + Caller Phone Number (Subtitle 0x02) +
+     *   Full 256-byte Message Body (Message 0x03) inside an inscribed scrollable card.
+     * - Strictly bounded within the 466x466 circular chord so zero text or buttons clip.
      */
-    private fun buildCircularSafeControlDeck(): LinearLayout {
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setBackgroundColor(Color.parseColor("#05070B"))
-        }
-
-        // 1. Top Arc Title + Live NS/DS Packet Counter (54% of 466px)
-        telemetryHeaderView = TextView(this).apply {
-            text = "OP2R · NS:0 DS:0"
-            setTextColor(Color.parseColor("#F8FAFC"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            gravity = Gravity.CENTER
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-        }
-        val headerParams = LinearLayout.LayoutParams(
-            pctOfWatchWidth(0.54f),
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            bottomMargin = dpToPx(4)
-        }
-
-        // 2. Upper Arc Connection Status + Tap-to-ReSync Pill (68% of 466px)
-        val statusPillBg = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dpToPx(999).toFloat()
-            setColor(Color.parseColor("#0F172A"))
-            setStroke(dpToPx(1), Color.parseColor("#1E293B"))
-        }
-        statusTextView = TextView(this).apply {
-            text = AncsBridgeService.currentStatusText
-            setTextColor(Color.parseColor("#38BDF8"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
-            typeface = Typeface.MONOSPACE
-            gravity = Gravity.CENTER
-            background = statusPillBg
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            setPadding(dpToPx(8), dpToPx(4), dpToPx(8), dpToPx(4))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                dispatchServiceAction(AncsBridgeService.ACTION_RESYNC_ANCS)
-            }
-        }
-        val statusParams = LinearLayout.LayoutParams(
-            pctOfWatchWidth(0.68f),
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            bottomMargin = dpToPx(6)
-        }
-
-        // 3. Equator 2-Column Primary Mode Row (82% of 466px = 382px, widest part of circle)
-        val primaryModesRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        val btnPeripheralMode = createCompactWatchPillButton(
-            label = "Advertise\niPhone (A)",
-            bgColorHex = "#1B253D",
-            strokeColorHex = "#38BDF8",
-            textSizeSp = 10.5f
-        ) {
-            dispatchServiceAction(AncsBridgeService.ACTION_START_PERIPHERAL)
-        }
-        val btnScannerMode = createCompactWatchPillButton(
-            label = "Scan\nBeacon (B)",
-            bgColorHex = "#1B253D",
-            strokeColorHex = "#10B981",
-            textSizeSp = 10.5f
-        ) {
-            dispatchServiceAction(AncsBridgeService.ACTION_START_SCAN)
-        }
-
-        val colLeftParams = LinearLayout.LayoutParams(0, dpToPx(44), 1f).apply {
-            rightMargin = dpToPx(4)
-        }
-        val colRightParams = LinearLayout.LayoutParams(0, dpToPx(44), 1f).apply {
-            leftMargin = dpToPx(4)
-        }
-        primaryModesRow.addView(btnPeripheralMode, colLeftParams)
-        primaryModesRow.addView(btnScannerMode, colRightParams)
-
-        val primaryRowParams = LinearLayout.LayoutParams(
-            pctOfWatchWidth(0.82f),
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            bottomMargin = dpToPx(6)
-        }
-
-        // 4. Center Pre-Existing Filter Toggle Pill (76% of 466px = 354px)
-        preExistingToggleBtn = createCompactWatchPillButton(
-            label = formatPreExistingLabel(),
-            bgColorHex = "#141C2E",
-            strokeColorHex = "#64748B",
-            textSizeSp = 9.5f
-        ) {
-            ignorePreExisting = !ignorePreExisting
-            preExistingToggleBtn.text = formatPreExistingLabel()
-            val intent = Intent(this, AncsBridgeService::class.java).apply {
-                action = AncsBridgeService.ACTION_SET_IGNORE_PRE_EXISTING
-                putExtra(AncsBridgeService.EXTRA_IGNORE_PRE_EXISTING, ignorePreExisting)
-            }
-            ContextCompat.startForegroundService(this, intent)
-        }
-        val toggleParams = LinearLayout.LayoutParams(
-            pctOfWatchWidth(0.76f),
-            dpToPx(32)
-        ).apply {
-            bottomMargin = dpToPx(6)
-        }
-
-        // 5. Tapered Lower Arc 2-Column Utility Row (64% of 466px = 298px, fits inside bottom curve)
-        val utilityRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        val btnTestAlert = createCompactWatchPillButton(
-            label = "Test + Sync",
-            bgColorHex = "#132A24",
-            strokeColorHex = "#10B981",
-            textSizeSp = 9.5f
-        ) {
-            dispatchServiceAction(AncsBridgeService.ACTION_TRIGGER_TEST_ALERT)
-        }
-        val btnResetBle = createCompactWatchPillButton(
-            label = "Reset BLE",
-            bgColorHex = "#2A151C",
-            strokeColorHex = "#EF4444",
-            textSizeSp = 9.5f
-        ) {
-            dispatchServiceAction(AncsBridgeService.ACTION_RESET_BLE)
-        }
-
-        val utilLeftParams = LinearLayout.LayoutParams(0, dpToPx(31), 1f).apply {
-            rightMargin = dpToPx(4)
-        }
-        val utilRightParams = LinearLayout.LayoutParams(0, dpToPx(31), 1f).apply {
-            leftMargin = dpToPx(4)
-        }
-        utilityRow.addView(btnTestAlert, utilLeftParams)
-        utilityRow.addView(btnResetBle, utilRightParams)
-
-        val utilityRowParams = LinearLayout.LayoutParams(
-            pctOfWatchWidth(0.64f),
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        )
-
-        container.addView(telemetryHeaderView, headerParams)
-        container.addView(statusTextView, statusParams)
-        container.addView(primaryModesRow, primaryRowParams)
-        container.addView(preExistingToggleBtn, toggleParams)
-        container.addView(utilityRow, utilityRowParams)
-
-        return container
-    }
-
-    /**
-     * Builds the Circular-Inscribed Full-Screen Notification Message Popup Card
-     * proportioned specifically for the 466x466 OnePlus Watch 2R screen:
-     * - Top App Badge: max 50% width
-     * - Sender Title: 72% width
-     * - Scrollable Message Box (Equator): 80% width, fixed 76dp height
-     * - Tapered Bottom Action Pill: 50% width (Dismiss) or 60% width (Accept / Decline)
-     */
-    private fun buildCircularInscribedNotificationPopup(): FrameLayout {
-        val overlayFrame = FrameLayout(this).apply {
-            setBackgroundColor(Color.parseColor("#060911"))
+    private fun buildCircularInscribedNotificationPopup(inscribedInsetPx: Int): FrameLayout {
+        val overlay = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#F5000000"))
             visibility = View.GONE
             isClickable = true
             isFocusable = true
         }
 
-        val cardContainer = LinearLayout(this).apply {
+        val cardWrapper = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
+            setPadding(
+                inscribedInsetPx,
+                inscribedInsetPx - dp(6),
+                inscribedInsetPx,
+                inscribedInsetPx - dp(6)
+            )
         }
 
-        val badgeBackground = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dpToPx(999).toFloat()
-            setColor(Color.parseColor("#14263B"))
-            setStroke(dpToPx(1), Color.parseColor("#38BDF8"))
+        val cardBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            background = createRoundedDrawable("#111827", "#38BDF8", dp(16))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
         }
 
-        // 1. Tapered Top App Badge (50% width)
-        popupAppBadgeView = TextView(this).apply {
-            text = "WhatsApp"
+        popupCategoryBadge = TextView(this).apply {
+            text = "NEW MESSAGE"
             setTextColor(Color.parseColor("#38BDF8"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            typeface = Typeface.MONOSPACE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             gravity = Gravity.CENTER
-            background = badgeBackground
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            setPadding(dpToPx(10), dpToPx(3), dpToPx(10), dpToPx(3))
-        }
-        val badgeParams = LinearLayout.LayoutParams(
-            pctOfWatchWidth(0.50f),
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            bottomMargin = dpToPx(5)
         }
 
-        // 2. Sender / Title (72% width)
+        popupAppNameView = TextView(this).apply {
+            text = "iMessage"
+            setTextColor(Color.parseColor("#9CA3AF"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+            gravity = Gravity.CENTER
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(0, dp(1), 0, dp(2))
+        }
+
+        // Caller Name or Sender Name (ANCS Attribute 0x01 Title)
         popupTitleView = TextView(this).apply {
-            text = "Notification Title"
-            setTextColor(Color.parseColor("#FFFFFF"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            text = "Sender Name"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(0, dp(1), 0, dp(1))
+        }
+
+        // Caller ID Phone Number or Thread Subtitle (ANCS Attribute 0x02 Subtitle)
+        popupSubtitleView = TextView(this).apply {
+            text = ""
+            setTextColor(Color.parseColor("#38BDF8"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             gravity = Gravity.CENTER
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-        }
-        val titleParams = LinearLayout.LayoutParams(
-            pctOfWatchWidth(0.72f),
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            bottomMargin = dpToPx(6)
+            visibility = View.GONE
+            setPadding(0, 0, 0, dp(4))
         }
 
-        // 3. Inscribed Equator Scrollable Message Box (80% width, 76dp height)
-        val messageBoxDrawable = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dpToPx(14).toFloat()
-            setColor(Color.parseColor("#111827"))
-            setStroke(dpToPx(1), Color.parseColor("#1E293B"))
-        }
-
-        val messageScrollView = ScrollView(this).apply {
-            background = messageBoxDrawable
-            isFillViewport = true
+        // Inscribed scrollable message box for the full 256-byte Attribute 0x03 Message Body
+        val messageScroll = ScrollView(this).apply {
             isVerticalScrollBarEnabled = true
-            setPadding(dpToPx(10), dpToPx(8), dpToPx(10), dpToPx(8))
+            background = createRoundedDrawable("#090D16", "#1F2937", dp(10))
+            setPadding(dp(8), dp(6), dp(8), dp(6))
         }
 
         popupMessageView = TextView(this).apply {
-            text = "Full notification message body is displayed here."
-            setTextColor(Color.parseColor("#F1F5F9"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            gravity = Gravity.CENTER
+            text = "Full 256-byte ANCS Attribute 0x03 message body..."
+            setTextColor(Color.parseColor("#F3F4F6"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setLineSpacing(0f, 1.15f)
+            gravity = Gravity.CENTER_HORIZONTAL
         }
-        messageScrollView.addView(
+
+        messageScroll.addView(
             popupMessageView,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -427,289 +414,251 @@ class MainActivity : ComponentActivity() {
             )
         )
 
-        val messageBoxParams = LinearLayout.LayoutParams(
-            pctOfWatchWidth(0.80f),
-            dpToPx(76)
-        ).apply {
-            bottomMargin = dpToPx(8)
-        }
-
-        // 4A. Tapered Lower Arc Call Action Row (60% width)
-        popupCallActionsRow = LinearLayout(this).apply {
+        val actionsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            visibility = View.GONE
+            setPadding(0, dp(8), 0, 0)
         }
 
-        val btnDeclineCall = createCompactWatchPillButton(
-            label = "Decline",
-            bgColorHex = "#DC2626",
-            strokeColorHex = "#F87171",
-            textSizeSp = 10f
-        ) {
-            if (activePopupNotificationUid != -1) {
-                dispatchCallAction(activePopupNotificationUid, AncsPacketParser.ACTION_ID_NEGATIVE)
-                hideFullScreenMessagePopup()
+        popupPositiveButton = createWatchActionButton("Accept", "#059669") {
+            if (activePopupUid != -1) {
+                sendActionToBridge(AncsBridgeService.ACTION_PERFORM_POSITIVE, activePopupUid)
             }
+            popupOverlayContainer.visibility = View.GONE
         }
 
-        val btnAcceptCall = createCompactWatchPillButton(
-            label = "Accept",
-            bgColorHex = "#059669",
-            strokeColorHex = "#34D399",
-            textSizeSp = 10f
-        ) {
-            if (activePopupNotificationUid != -1) {
-                dispatchCallAction(activePopupNotificationUid, AncsPacketParser.ACTION_ID_POSITIVE)
-                hideFullScreenMessagePopup()
+        popupNegativeButton = createWatchActionButton("Dismiss", "#DC2626") {
+            if (activePopupUid != -1) {
+                sendActionToBridge(AncsBridgeService.ACTION_PERFORM_NEGATIVE, activePopupUid)
             }
+            popupOverlayContainer.visibility = View.GONE
         }
 
-        val callLeftParams = LinearLayout.LayoutParams(0, dpToPx(32), 1f).apply {
-            rightMargin = dpToPx(4)
+        popupCloseButton = createWatchActionButton("Close", "#374151") {
+            popupOverlayContainer.visibility = View.GONE
         }
-        val callRightParams = LinearLayout.LayoutParams(0, dpToPx(32), 1f).apply {
-            leftMargin = dpToPx(4)
-        }
-        popupCallActionsRow.addView(btnDeclineCall, callLeftParams)
-        popupCallActionsRow.addView(btnAcceptCall, callRightParams)
 
-        val callRowParams = LinearLayout.LayoutParams(
-            pctOfWatchWidth(0.60f),
-            LinearLayout.LayoutParams.WRAP_CONTENT
+        actionsRow.addView(
+            popupPositiveButton,
+            LinearLayout.LayoutParams(0, dp(32), 1f).apply { marginEnd = dp(3) }
+        )
+        actionsRow.addView(
+            popupNegativeButton,
+            LinearLayout.LayoutParams(0, dp(32), 1f).apply {
+                marginStart = dp(3)
+                marginEnd = dp(3)
+            }
+        )
+        actionsRow.addView(
+            popupCloseButton,
+            LinearLayout.LayoutParams(0, dp(32), 0.85f).apply { marginStart = dp(3) }
         )
 
-        // 4B. Tapered Lower Arc Dismiss Pill Button (50% width, fits inside bottom curve)
-        popupDismissBtn = createCompactWatchPillButton(
-            label = "Dismiss",
-            bgColorHex = "#1E293B",
-            strokeColorHex = "#38BDF8",
-            textSizeSp = 10.5f
-        ) {
-            if (activePopupNotificationUid != -1) {
-                val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                val notifyId = 2000 + (activePopupNotificationUid and 0x0FFFFFFF)
-                nm.cancel(notifyId)
-            }
-            hideFullScreenMessagePopup()
-        }
-
-        val dismissParams = LinearLayout.LayoutParams(
-            pctOfWatchWidth(0.50f),
-            dpToPx(32)
+        cardBox.addView(popupCategoryBadge)
+        cardBox.addView(popupAppNameView)
+        cardBox.addView(popupTitleView)
+        cardBox.addView(popupSubtitleView)
+        cardBox.addView(
+            messageScroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(88)
+            )
+        )
+        cardBox.addView(
+            actionsRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
         )
 
-        cardContainer.addView(popupAppBadgeView, badgeParams)
-        cardContainer.addView(popupTitleView, titleParams)
-        cardContainer.addView(messageScrollView, messageBoxParams)
-        cardContainer.addView(popupCallActionsRow, callRowParams)
-        cardContainer.addView(popupDismissBtn, dismissParams)
+        cardWrapper.addView(
+            cardBox,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
 
-        overlayFrame.addView(
-            cardContainer,
+        overlay.addView(
+            cardWrapper,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 Gravity.CENTER
             )
         )
-        return overlayFrame
+
+        return overlay
     }
 
-    private fun handleIncomingNotificationIntent(intent: Intent?) {
-        if (intent == null) return
-        if (!intent.hasExtra(AncsBridgeService.EXTRA_MESSAGE) &&
-            !intent.hasExtra(AncsBridgeService.EXTRA_TITLE)
-        ) {
-            return
+    private fun handleIncomingPopupIntent(intent: Intent?) {
+        if (intent?.action != AncsBridgeService.ACTION_SHOW_WATCH_POPUP) return
+        val uid = intent.getIntExtra(AncsBridgeService.EXTRA_NOTIFICATION_UID, -1)
+        if (uid == -1) return
+
+        val alert = AncsPacketParser.AssembledAncsNotification(
+            notificationUid = uid,
+            categoryId = intent.getIntExtra(AncsBridgeService.EXTRA_CATEGORY_ID, 0),
+            eventFlags = 0,
+            appIdentifier = intent.getStringExtra(AncsBridgeService.EXTRA_APP_ID).orEmpty(),
+            title = intent.getStringExtra(AncsBridgeService.EXTRA_TITLE).orEmpty(),
+            subtitle = intent.getStringExtra(AncsBridgeService.EXTRA_SUBTITLE).orEmpty(),
+            message = intent.getStringExtra(AncsBridgeService.EXTRA_MESSAGE).orEmpty(),
+            hasPositiveAction = intent.getBooleanExtra(AncsBridgeService.EXTRA_HAS_POSITIVE, false),
+            hasNegativeAction = intent.getBooleanExtra(AncsBridgeService.EXTRA_HAS_NEGATIVE, true)
+        )
+        enableWakeAndShowWhenLocked()
+        showNotificationPopupCard(alert)
+    }
+
+    private fun showNotificationPopupCard(alert: AncsPacketParser.AssembledAncsNotification) {
+        activePopupUid = alert.notificationUid
+        val isCall = alert.categoryId == AncsPacketParser.CATEGORY_ID_INCOMING_CALL
+
+        popupCategoryBadge.text = if (isCall) "INCOMING IPHONE CALL" else "ANCS 0x03 MESSAGE"
+        popupCategoryBadge.setTextColor(
+            Color.parseColor(if (isCall) "#10B981" else "#38BDF8")
+        )
+        popupAppNameView.text = formatReadableAppId(alert.appIdentifier, isCall)
+        popupTitleView.text = alert.title.ifBlank { if (isCall) "Incoming Call" else "iPhone Alert" }
+        popupTitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (isCall) 15f else 14f)
+
+        if (alert.subtitle.isNotBlank() && alert.subtitle != alert.title) {
+            popupSubtitleView.text = if (isCall) "ID: ${alert.subtitle}" else alert.subtitle
+            popupSubtitleView.visibility = View.VISIBLE
+        } else {
+            popupSubtitleView.visibility = View.GONE
         }
 
-        val uid = intent.getIntExtra(AncsBridgeService.EXTRA_NOTIFICATION_UID, -1)
-        val appName = intent.getStringExtra(AncsBridgeService.EXTRA_APP_NAME) ?: "iOS Alert"
-        val title = intent.getStringExtra(AncsBridgeService.EXTRA_TITLE) ?: appName
-        val message = intent.getStringExtra(AncsBridgeService.EXTRA_MESSAGE) ?: ""
-        val isCall = intent.getBooleanExtra(AncsBridgeService.EXTRA_IS_CALL, false)
-
-        activePopupNotificationUid = uid
-        popupAppBadgeView.text = if (isCall) "IPHONE CALL" else appName
-        popupTitleView.text = title
-        popupMessageView.text = message
+        popupMessageView.text = alert.message.ifBlank { alert.title }
 
         if (isCall) {
-            popupCallActionsRow.visibility = View.VISIBLE
-            popupDismissBtn.visibility = View.GONE
+            popupPositiveButton.visibility = View.VISIBLE
+            popupPositiveButton.text = "Accept"
+            popupNegativeButton.visibility = View.VISIBLE
+            popupNegativeButton.text = "Decline"
+            popupCloseButton.visibility = View.GONE
         } else {
-            popupCallActionsRow.visibility = View.GONE
-            popupDismissBtn.visibility = View.VISIBLE
+            popupPositiveButton.visibility = if (alert.hasPositiveAction) View.VISIBLE else View.GONE
+            popupPositiveButton.text = "Action"
+            popupNegativeButton.visibility = if (alert.hasNegativeAction) View.VISIBLE else View.GONE
+            popupNegativeButton.text = "Dismiss"
+            popupCloseButton.visibility = View.VISIBLE
         }
 
-        popupOverlayRoot.visibility = View.VISIBLE
+        popupOverlayContainer.visibility = View.VISIBLE
     }
 
-    private fun hideFullScreenMessagePopup() {
-        activePopupNotificationUid = -1
-        popupOverlayRoot.visibility = View.GONE
-    }
-
-    private fun dispatchCallAction(notificationUid: Int, actionId: Byte) {
-        val intent = Intent(this, AncsBridgeService::class.java).apply {
-            action = AncsBridgeService.ACTION_PERFORM_CALL_ACTION
-            putExtra(AncsBridgeService.EXTRA_NOTIFICATION_UID, notificationUid)
-            putExtra(AncsBridgeService.EXTRA_ANCS_ACTION_ID, actionId)
-        }
-        ContextCompat.startForegroundService(this, intent)
-    }
-
-    private fun createCompactWatchPillButton(
-        label: String,
-        bgColorHex: String,
-        strokeColorHex: String,
-        textSizeSp: Float,
-        onClick: () -> Unit
-    ): Button {
-        val drawable = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dpToPx(999).toFloat()
-            setColor(Color.parseColor(bgColorHex))
-            setStroke(dpToPx(1), Color.parseColor(strokeColorHex))
-        }
-
-        return Button(this).apply {
-            text = label
-            isAllCaps = false
-            setTextColor(Color.parseColor("#F8FAFC"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, textSizeSp)
-            gravity = Gravity.CENTER
-            background = drawable
-            setPadding(dpToPx(6), dpToPx(2), dpToPx(6), dpToPx(2))
-            setOnClickListener { onClick() }
+    private fun formatReadableAppId(appId: String, isCall: Boolean): String {
+        val lower = appId.lowercase()
+        return when {
+            isCall || lower.contains("mobilephone") || lower.contains("incallservice") ->
+                "iPhone Phone • Caller ID"
+            lower.contains("mobilesms") -> "iMessage • SMS"
+            lower.contains("whatsapp") -> "WhatsApp"
+            lower.contains("telegram") -> "Telegram"
+            lower.contains("instagram") -> "Instagram"
+            lower.contains("gmail") || lower.contains("mobilemail") -> "Mail"
+            lower.contains("slack") -> "Slack"
+            else -> appId.substringAfterLast('.').ifBlank { "iOS App" }
         }
     }
 
-    private fun formatPreExistingLabel(): String {
-        val stateLabel = if (ignorePreExisting) "Smart (2.5s)" else "Show All"
-        return "Pre-Existing: $stateLabel"
+    private fun observeBridgeState() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                AncsBridgeService.bridgeState.collect { state ->
+                    statusBadgeView.text = state.statusText
+                    val devName = state.connectedDeviceName ?: "No iPhone"
+                    val bondTag = if (state.isBonded) "Bonded" else "Unbonded"
+                    val rssiTag = if (state.lastRssi != 0) " • ${state.lastRssi}dBm" else ""
+                    deviceInfoView.text = "$devName ($bondTag) • MTU ${state.negotiatedMtu}$rssiTag"
+                    telemetryStatsView.text =
+                        "Src:${state.rxSourcePackets} • 0x03:${state.rxDataPackets} • HB:${state.keepAlivePings}"
+
+                    val last = state.lastNotification
+                    if (last != null) {
+                        val subtitleTag = if (last.subtitle.isNotBlank()) " (${last.subtitle})" else ""
+                        lastAlertSummaryView.text =
+                            "[UID ${last.notificationUid}] ${last.title}$subtitleTag\n${last.message}\n(Tap to open)"
+
+                        // Automatically pop up or update in-place when Title/Subtitle/Message 0x03 updates
+                        val signature = "${last.notificationUid}:${last.title}:${last.subtitle}:${last.message}"
+                        if (signature != lastShownPopupSignature) {
+                            lastShownPopupSignature = signature
+                            showNotificationPopupCard(last)
+                        }
+                    }
+
+                    if (state.diagnosticLog.isNotEmpty()) {
+                        logFeedView.text = state.diagnosticLog.take(6).joinToString("\n") { "• $it" }
+                    }
+                }
+            }
+        }
     }
 
-    private fun updateWatchUiState(state: String, nsCount: Int, dsCount: Int) {
-        telemetryHeaderView.text = "OP2R · NS:$nsCount DS:$dsCount"
-        statusTextView.text = if (state.contains("Bonded", ignoreCase = true)) {
-            "$state (Tap Re-Sync)"
-        } else {
-            state
-        }
-        val colorHex = when {
-            state.contains("Bonded", ignoreCase = true) -> "#10B981"
-            state.contains("Advertising", ignoreCase = true) ||
-                state.contains("Scanning", ignoreCase = true) ||
-                state.contains("Re-Sync", ignoreCase = true) -> "#F59E0B"
-            state.contains("Error", ignoreCase = true) ||
-                state.contains("Failed", ignoreCase = true) -> "#EF4444"
-            else -> "#38BDF8"
-        }
-        statusTextView.setTextColor(Color.parseColor(colorHex))
-        preExistingToggleBtn.text = formatPreExistingLabel()
-    }
-
-    private fun requestRequiredBleAndNotificationPermissions() {
-        val requiredPermissions = mutableListOf(
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.ACCESS_COARSE_LOCATION
-        )
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            requiredPermissions.add(Manifest.permission.BLUETOOTH_SCAN)
-            requiredPermissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
-            requiredPermissions.add(Manifest.permission.BLUETOOTH_CONNECT)
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            requiredPermissions.add(Manifest.permission.POST_NOTIFICATIONS)
-        }
-
+    private fun ensurePermissionsAndStartBridge() {
         val missing = requiredPermissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-
-        if (missing.isNotEmpty()) {
-            permissionLauncher.launch(missing.toTypedArray())
+        if (missing.isEmpty()) {
+            startBridgeService(AncsBridgeService.ACTION_START_MODE_A_PERIPHERAL)
         } else {
-            startAndBindForegroundBridgeService()
-            promptBatteryOptimizationsOnFirstLaunch()
+            permissionLauncher.launch(missing.toTypedArray())
         }
     }
 
-    private fun startAndBindForegroundBridgeService() {
-        val serviceIntent = Intent(this, AncsBridgeService::class.java)
-        ContextCompat.startForegroundService(this, serviceIntent)
-    }
-
-    private fun dispatchServiceAction(action: String) {
+    private fun startBridgeService(action: String) {
         val intent = Intent(this, AncsBridgeService::class.java).apply {
             this.action = action
         }
         ContextCompat.startForegroundService(this, intent)
     }
 
-    private fun promptBatteryOptimizationsOnFirstLaunch() {
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-            requestIgnoreBatteryOptimizations()
+    private fun sendActionToBridge(action: String, notificationUid: Int) {
+        val intent = Intent(this, AncsBridgeService::class.java).apply {
+            this.action = action
+            putExtra(AncsBridgeService.EXTRA_NOTIFICATION_UID, notificationUid)
+        }
+        ContextCompat.startForegroundService(this, intent)
+    }
+
+    private fun createWatchActionButton(
+        label: String,
+        bgColorHex: String,
+        onClick: () -> Unit
+    ): Button {
+        return Button(this).apply {
+            text = label
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            background = createRoundedDrawable(bgColorHex, "#3F3F46", dp(8))
+            setPadding(dp(4), dp(2), dp(4), dp(2))
+            setOnClickListener { onClick() }
         }
     }
 
-    @SuppressLint("BatteryLife")
-    private fun requestIgnoreBatteryOptimizations() {
-        try {
-            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = Uri.parse("package:$packageName")
-            }
-            startActivity(intent)
-        } catch (e: Exception) {
-            val fallbackIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-            startActivity(fallbackIntent)
+    private fun createRoundedDrawable(
+        fillHex: String,
+        strokeHex: String,
+        radiusPx: Int
+    ): GradientDrawable {
+        return GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = radiusPx.toFloat()
+            setColor(Color.parseColor(fillHex))
+            setStroke(dp(1), Color.parseColor(strokeHex))
         }
     }
 
-    private fun registerBridgeBroadcastReceiver() {
-        if (!isReceiverRegistered) {
-            val filter = IntentFilter().apply {
-                addAction(AncsBridgeService.ACTION_STATE_BROADCAST)
-                addAction(AncsBridgeService.ACTION_NEW_NOTIFICATION_BROADCAST)
-                addAction(AncsBridgeService.ACTION_DISMISS_NOTIFICATION_BROADCAST)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(bridgeReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                registerReceiver(bridgeReceiver, filter)
-            }
-            isReceiverRegistered = true
-        }
-    }
-
-    private fun unregisterBridgeBroadcastReceiver() {
-        if (isReceiverRegistered) {
-            try {
-                unregisterReceiver(bridgeReceiver)
-            } catch (_: Exception) {
-            }
-            isReceiverRegistered = false
-        }
-    }
-
-    /**
-     * Computes exact pixel width from a fraction of the OnePlus Watch 2R (466px) round screen diameter
-     * so every row stays strictly inside the circular chord at its vertical offset.
-     */
-    private fun pctOfWatchWidth(fraction: Float): Int {
-        val screenWidth = resources.displayMetrics.widthPixels.coerceAtLeast(320)
-        return (screenWidth * fraction).toInt()
-    }
-
-    private fun dpToPx(dp: Int): Int {
+    private fun dp(value: Int): Int {
         return TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_DIP,
-            dp.toFloat(),
+            value.toFloat(),
             resources.displayMetrics
         ).toInt()
     }

@@ -1,6 +1,6 @@
 {
-  "summary":  "Updated implementation plan to fix the silent ANCS notification/call drop on OnePlus Watch 2R + iPhone 14: adds automatic post-bond ANCS CCCD re-subscription waves (+3s/+8s) and onServiceChanged handling, fixes the AncsPacketParser attribute length deadlock and Control Point queue overlap, adds immediate 8-byte Notification Source fallback alerts for calls and messages, and adds live on-watch NS/DS packet telemetry plus an on-watch Re-Sync & Test Alert trigger.",
-  "updatedAt":  "2026-10-26T14:02:49.294168962Z",
+  "summary":  "Implementation plan for Apple Watch-grade persistent BLE connection, ANCS Data Source Attribute 0x03 full 256-byte message extraction, and Subtitle 0x02 Caller ID phone number display on the OnePlus Watch 2R.",
+  "updatedAt":  "2026-10-26T16:33:15.114765126Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

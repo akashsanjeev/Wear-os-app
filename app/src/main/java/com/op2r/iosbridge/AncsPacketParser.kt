@@ -4,134 +4,83 @@ import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Dedicated ANCS (Apple Notification Center Service) Protocol Parser &
- * Deadlock-Proof Multi-Packet BLE MTU Fragmentation Reassembly State Machine.
+ * Apple Notification Center Service (ANCS) Specification v1.1 Binary Protocol Engine.
+ *
+ * Implements:
+ * 1. 8-byte Notification Source (UUID 9FBF120D-6301-42D9-8C58-25E699A21DBD) parser.
+ * 2. 14-byte Control Point (UUID 69D1D8F3-45E1-49A8-9821-9BBDFDAAD9D9) command builder:
+ *    - CommandIDGetNotificationAttributes (0x00) + NotificationUID (4B LE) +
+ *      AttributeIDAppIdentifier (0x00) +
+ *      AttributeIDTitle (0x01, max 64B LE) +
+ *      AttributeIDSubtitle (0x02, max 64B LE) [Caller ID Phone Number / Group Name] +
+ *      AttributeIDMessage (0x03, max 256B LE) [Full Message Body prioritized]
+ *    - CommandIDPerformNotificationAction (0x02) + NotificationUID (4B LE) + ActionID (0x00/0x01)
+ * 3. Stateful Multi-Packet Fragmentation State Machine for Data Source
+ *    (UUID 22EAC6E9-24D6-4BB5-BE44-B36ACE7C7BFB) with prioritized AttributeID 0x03 extraction
+ *    and idle-stream partial flush support so real payload text is never replaced by generic placeholders.
  */
 class AncsPacketParser(
     private val onNotificationAssembled: (AssembledAncsNotification) -> Unit
 ) {
-
     companion object {
-        // EventID Constants
-        const val EVENT_ID_NOTIFICATION_ADDED = 0
-        const val EVENT_ID_NOTIFICATION_MODIFIED = 1
-        const val EVENT_ID_NOTIFICATION_REMOVED = 2
+        // EventID Values
+        const val EVENT_ID_NOTIFICATION_ADDED: Int = 0
+        const val EVENT_ID_NOTIFICATION_MODIFIED: Int = 1
+        const val EVENT_ID_NOTIFICATION_REMOVED: Int = 2
 
-        // EventFlags Bitmask Constants
-        const val EVENT_FLAG_SILENT = 1 shl 0          // 0x01
-        const val EVENT_FLAG_IMPORTANT = 1 shl 1       // 0x02
-        const val EVENT_FLAG_PRE_EXISTING = 1 shl 2    // 0x04
-        const val EVENT_FLAG_POSITIVE_ACTION = 1 shl 3 // 0x08
-        const val EVENT_FLAG_NEGATIVE_ACTION = 1 shl 4 // 0x10
+        // EventFlags Bitmask
+        const val EVENT_FLAG_SILENT: Int = 1 shl 0            // 0x01
+        const val EVENT_FLAG_IMPORTANT: Int = 1 shl 1         // 0x02
+        const val EVENT_FLAG_PRE_EXISTING: Int = 1 shl 2      // 0x04
+        const val EVENT_FLAG_POSITIVE_ACTION: Int = 1 shl 3   // 0x08
+        const val EVENT_FLAG_NEGATIVE_ACTION: Int = 1 shl 4   // 0x10
 
-        // CategoryID Constants
-        const val CATEGORY_ID_OTHER = 0
-        const val CATEGORY_ID_INCOMING_CALL = 1
-        const val CATEGORY_ID_MISSED_CALL = 2
-        const val CATEGORY_ID_VOICEMAIL = 3
-        const val CATEGORY_ID_SOCIAL = 4
-        const val CATEGORY_ID_SCHEDULE = 5
-        const val CATEGORY_ID_EMAIL = 6
-        const val CATEGORY_ID_NEWS = 7
-        const val CATEGORY_ID_HEALTH_AND_FITNESS = 8
-        const val CATEGORY_ID_BUSINESS_AND_FINANCE = 9
-        const val CATEGORY_ID_LOCATION = 10
-        const val CATEGORY_ID_ENTERTAINMENT = 11
+        // CategoryID Values
+        const val CATEGORY_ID_OTHER: Int = 0
+        const val CATEGORY_ID_INCOMING_CALL: Int = 1
+        const val CATEGORY_ID_MISSED_CALL: Int = 2
+        const val CATEGORY_ID_VOICEMAIL: Int = 3
+        const val CATEGORY_ID_SOCIAL: Int = 4
+        const val CATEGORY_ID_SCHEDULE: Int = 5
+        const val CATEGORY_ID_EMAIL: Int = 6
+        const val CATEGORY_ID_NEWS: Int = 7
+        const val CATEGORY_ID_HEALTH_AND_FITNESS: Int = 8
+        const val CATEGORY_ID_BUSINESS_AND_FINANCE: Int = 9
+        const val CATEGORY_ID_LOCATION: Int = 10
+        const val CATEGORY_ID_ENTERTAINMENT: Int = 11
 
-        // CommandID Constants
+        // CommandID Values
         const val COMMAND_ID_GET_NOTIFICATION_ATTRIBUTES: Byte = 0x00
         const val COMMAND_ID_GET_APP_ATTRIBUTES: Byte = 0x01
         const val COMMAND_ID_PERFORM_NOTIFICATION_ACTION: Byte = 0x02
 
-        // Notification AttributeID Constants
-        const val ATTRIBUTE_ID_APP_IDENTIFIER: Int = 0x00
-        const val ATTRIBUTE_ID_TITLE: Int = 0x01
-        const val ATTRIBUTE_ID_SUBTITLE: Int = 0x02
-        const val ATTRIBUTE_ID_MESSAGE: Int = 0x03
-        const val ATTRIBUTE_ID_MESSAGE_SIZE: Int = 0x04
-        const val ATTRIBUTE_ID_DATE: Int = 0x05
-        const val ATTRIBUTE_ID_POSITIVE_ACTION_LABEL: Int = 0x06
-        const val ATTRIBUTE_ID_NEGATIVE_ACTION_LABEL: Int = 0x07
+        // NotificationAttributeID Values
+        const val ATTRIBUTE_ID_APP_IDENTIFIER: Byte = 0x00
+        const val ATTRIBUTE_ID_TITLE: Byte = 0x01
+        const val ATTRIBUTE_ID_SUBTITLE: Byte = 0x02
+        const val ATTRIBUTE_ID_MESSAGE: Byte = 0x03
+        const val ATTRIBUTE_ID_MESSAGE_SIZE: Byte = 0x04
+        const val ATTRIBUTE_ID_DATE: Byte = 0x05
+        const val ATTRIBUTE_ID_POSITIVE_ACTION_LABEL: Byte = 0x06
+        const val ATTRIBUTE_ID_NEGATIVE_ACTION_LABEL: Byte = 0x07
 
-        // ActionID Constants
+        // ActionID Values
         const val ACTION_ID_POSITIVE: Byte = 0x00
         const val ACTION_ID_NEGATIVE: Byte = 0x01
 
-        // Max sanity bound for a single attribute payload (we request max 64B Title, 256B Message)
-        private const val MAX_VALID_ATTRIBUTE_BYTES = 1024
+        // Requested attribute maximum lengths (Little Endian uint16)
+        const val MAX_TITLE_BYTES: Int = 64
+        const val MAX_SUBTITLE_BYTES: Int = 64
+        const val MAX_MESSAGE_BYTES: Int = 256
 
-        // Requested Attributes per Notification (AppIdentifier, Title, Message)
         private val EXPECTED_ATTRIBUTES = setOf(
-            ATTRIBUTE_ID_APP_IDENTIFIER,
-            ATTRIBUTE_ID_TITLE,
-            ATTRIBUTE_ID_MESSAGE
+            ATTRIBUTE_ID_APP_IDENTIFIER.toInt(),
+            ATTRIBUTE_ID_TITLE.toInt(),
+            ATTRIBUTE_ID_SUBTITLE.toInt(),
+            ATTRIBUTE_ID_MESSAGE.toInt()
         )
-
-        private val IOS_BUNDLE_NAME_MAP = mapOf(
-            "com.apple.MobileSMS" to "Messages",
-            "com.apple.mobilephone" to "Phone",
-            "com.apple.InCallService" to "Phone Call",
-            "com.apple.facetime" to "FaceTime",
-            "com.apple.mobilemail" to "Mail",
-            "com.apple.mobilecal" to "Calendar",
-            "com.apple.reminders" to "Reminders",
-            "com.apple.Passbook" to "Apple Wallet",
-            "net.whatsapp.WhatsApp" to "WhatsApp",
-            "net.whatsapp.WhatsAppSMB" to "WhatsApp Business",
-            "ph.telegra.Telegraph" to "Telegram",
-            "org.whispersystems.signal" to "Signal",
-            "com.burbn.instagram" to "Instagram",
-            "com.facebook.Messenger" to "Messenger",
-            "com.atebits.Tweetie2" to "X (Twitter)",
-            "com.Slack" to "Slack",
-            "com.hammerandchisel.discord" to "Discord",
-            "com.google.Gmail" to "Gmail",
-            "com.microsoft.Office.Outlook" to "Outlook",
-            "com.microsoft.skype.teams" to "Teams",
-            "com.spotify.client" to "Spotify",
-            "com.google.ios.youtube" to "YouTube",
-            "com.ubercab.UberClient" to "Uber"
-        )
-
-        /**
-         * Maps raw iOS bundle identifier to a clean human-readable app title.
-         */
-        fun resolveAppDisplayName(bundleId: String): String {
-            val cleaned = bundleId.trim()
-            if (cleaned.isEmpty()) return "iPhone Alert"
-            IOS_BUNDLE_NAME_MAP[cleaned]?.let { return it }
-            val fallbackSegment = cleaned.substringAfterLast('.')
-            return if (fallbackSegment.isNotBlank()) {
-                fallbackSegment.replaceFirstChar {
-                    if (it.isLowerCase()) it.titlecase() else it.toString()
-                }
-            } else {
-                cleaned
-            }
-        }
-
-        /**
-         * Resolves CategoryID integer into human-readable label.
-         */
-        fun resolveCategoryName(categoryId: Int): String {
-            return when (categoryId) {
-                CATEGORY_ID_INCOMING_CALL -> "Incoming Call"
-                CATEGORY_ID_MISSED_CALL -> "Missed Call"
-                CATEGORY_ID_VOICEMAIL -> "Voicemail"
-                CATEGORY_ID_SOCIAL -> "Social / Message"
-                CATEGORY_ID_SCHEDULE -> "Schedule"
-                CATEGORY_ID_EMAIL -> "Email"
-                CATEGORY_ID_NEWS -> "News"
-                CATEGORY_ID_HEALTH_AND_FITNESS -> "Health & Fitness"
-                CATEGORY_ID_BUSINESS_AND_FINANCE -> "Finance"
-                CATEGORY_ID_LOCATION -> "Location"
-                CATEGORY_ID_ENTERTAINMENT -> "Entertainment"
-                else -> "iOS Notification"
-            }
-        }
     }
 
     data class NotificationSourceEvent(
@@ -152,52 +101,42 @@ class AncsPacketParser(
         val notificationUid: Int,
         val categoryId: Int,
         val eventFlags: Int,
-        val appBundleId: String,
-        val appDisplayName: String,
+        val appIdentifier: String,
         val title: String,
+        val subtitle: String,
         val message: String,
-        val isFallbackOnly: Boolean = false
-    ) {
-        val isIncomingCall: Boolean get() = categoryId == CATEGORY_ID_INCOMING_CALL
-        val isMissedCall: Boolean get() = categoryId == CATEGORY_ID_MISSED_CALL
-        val isSilent: Boolean get() = (eventFlags and EVENT_FLAG_SILENT) != 0
-    }
-
-    private enum class ParserState {
-        WAITING_FOR_COMMAND_HEADER,
-        READING_ATTRIBUTE_HEADER,
-        READING_ATTRIBUTE_PAYLOAD
-    }
+        val hasPositiveAction: Boolean,
+        val hasNegativeAction: Boolean,
+        val receivedTimestampMs: Long = System.currentTimeMillis()
+    )
 
     // Metadata cache keyed by NotificationUID from the 8-byte Notification Source packet
-    private val pendingEvents = ConcurrentHashMap<Int, NotificationSourceEvent>()
+    private val sourceMetadataByUid = LinkedHashMap<Int, NotificationSourceEvent>()
 
-    // Stream buffer and state machine fields guarded by synchronization lock
-    private val stateLock = Any()
+    // Stateful Data Source reassembly buffer across arbitrary BLE MTU chunks (20B - 247B)
     private val rawStreamBuffer = ByteArrayOutputStream()
-    private var currentState = ParserState.WAITING_FOR_COMMAND_HEADER
-    private var activeNotificationUid: Int = 0
-    private var activeAttributeId: Int = 0
-    private var activeAttributeLength: Int = 0
+    private var activeCommandUid: Int? = null
+    private var currentAttributeId: Int? = null
+    private var currentAttributeExpectedLen: Int = -1
     private val collectedAttributes = mutableMapOf<Int, String>()
 
     /**
-     * Parses an 8-byte ANCS Notification Source characteristic notification.
-     * Byte 0: EventID
-     * Byte 1: EventFlags
-     * Byte 2: CategoryID
+     * Parses the 8-byte Notification Source GATT notification payload:
+     * Byte 0: EventID (0=Added, 1=Modified, 2=Removed)
+     * Byte 1: EventFlags bitmask
+     * Byte 2: CategoryID (1=Incoming Call, 4=Social, etc.)
      * Byte 3: CategoryCount
      * Bytes 4..7: NotificationUID (uint32 Little-Endian)
      */
-    fun parseNotificationSourcePayload(bytes: ByteArray): NotificationSourceEvent? {
+    @Synchronized
+    fun parseNotificationSourcePacket(bytes: ByteArray): NotificationSourceEvent? {
         if (bytes.size < 8) return null
-        val eventId = bytes[0].toInt() and 0xFF
-        val eventFlags = bytes[1].toInt() and 0xFF
-        val categoryId = bytes[2].toInt() and 0xFF
-        val categoryCount = bytes[3].toInt() and 0xFF
-        val notificationUid = ByteBuffer.wrap(bytes, 4, 4)
-            .order(ByteOrder.LITTLE_ENDIAN)
-            .int
+        val buffer = ByteBuffer.wrap(bytes, 0, 8).order(ByteOrder.LITTLE_ENDIAN)
+        val eventId = buffer.get().toInt() and 0xFF
+        val eventFlags = buffer.get().toInt() and 0xFF
+        val categoryId = buffer.get().toInt() and 0xFF
+        val categoryCount = buffer.get().toInt() and 0xFF
+        val notificationUid = buffer.int
 
         val event = NotificationSourceEvent(
             eventId = eventId,
@@ -207,257 +146,318 @@ class AncsPacketParser(
             notificationUid = notificationUid
         )
 
-        if (eventId == EVENT_ID_NOTIFICATION_ADDED || eventId == EVENT_ID_NOTIFICATION_MODIFIED) {
-            pendingEvents[notificationUid] = event
-        } else if (eventId == EVENT_ID_NOTIFICATION_REMOVED) {
-            pendingEvents.remove(notificationUid)
+        if (eventId == EVENT_ID_NOTIFICATION_REMOVED) {
+            sourceMetadataByUid.remove(notificationUid)
+        } else {
+            sourceMetadataByUid[notificationUid] = event
+            // Cap metadata cache to prevent unbounded growth during long sessions
+            if (sourceMetadataByUid.size > 128) {
+                val oldestKey = sourceMetadataByUid.keys.firstOrNull()
+                if (oldestKey != null) {
+                    sourceMetadataByUid.remove(oldestKey)
+                }
+            }
         }
-
         return event
     }
 
     /**
-     * Builds a fallback notification directly from the 8-byte Notification Source event
-     * so Incoming Calls and Messages still wake and alert the watch even if iOS Data Source
-     * is delayed or restricted.
-     */
-    fun buildFallbackFromSourceEvent(event: NotificationSourceEvent): AssembledAncsNotification {
-        val categoryLabel = resolveCategoryName(event.categoryId)
-        val isCall = event.categoryId == CATEGORY_ID_INCOMING_CALL
-        return AssembledAncsNotification(
-            notificationUid = event.notificationUid,
-            categoryId = event.categoryId,
-            eventFlags = event.eventFlags,
-            appBundleId = if (isCall) "com.apple.mobilephone" else "ios.ancs.category.${event.categoryId}",
-            appDisplayName = if (isCall) "iPhone Call" else categoryLabel,
-            title = if (isCall) "Incoming iPhone Call" else categoryLabel,
-            message = if (isCall) {
-                "Ringing on iPhone (UID #${event.notificationUid}) — Fetching Caller ID..."
-            } else {
-                "New $categoryLabel received from iPhone (UID #${event.notificationUid})"
-            },
-            isFallbackOnly = true
-        )
-    }
-
-    /**
-     * Resets the Data Source stream parser right before a new serialized Control Point (0x00)
-     * attribute request is dispatched on the BLE wire, preventing any stale trailing bytes
-     * from deadlocking the next notification.
-     */
-    fun prepareForAttributeRequest(expectedNotificationUid: Int) {
-        synchronized(stateLock) {
-            rawStreamBuffer.reset()
-            collectedAttributes.clear()
-            currentState = ParserState.WAITING_FOR_COMMAND_HEADER
-            activeNotificationUid = expectedNotificationUid
-            activeAttributeId = 0
-            activeAttributeLength = 0
-        }
-    }
-
-    /**
-     * Builds the 11-byte Control Point request for CommandIDGetNotificationAttributes (0x00):
-     * - CommandID: 0x00 (1 byte)
-     * - NotificationUID: Little-Endian uint32 (4 bytes)
-     * - AttributeIDAppIdentifier: 0x00 (1 byte, no length parameter)
-     * - AttributeIDTitle: 0x01 + MaxLength 64 (0x40, 0x00 Little-Endian)
-     * - AttributeIDMessage: 0x03 + MaxLength 256 (0x00, 0x01 Little-Endian)
+     * Constructs the 14-byte Control Point request for CommandIDGetNotificationAttributes (0x00):
+     * - Byte 0: 0x00 (CommandIDGetNotificationAttributes)
+     * - Bytes 1..4: NotificationUID (4 bytes Little-Endian)
+     * - Byte 5: 0x00 (AttributeIDAppIdentifier - no length parameter per ANCS spec)
+     * - Byte 6: 0x01 (AttributeIDTitle)
+     * - Bytes 7..8: 0x40, 0x00 (64 bytes max length, uint16 LE)
+     * - Byte 9: 0x02 (AttributeIDSubtitle - carries Caller Phone Number / Group Name)
+     * - Bytes 10..11: 0x40, 0x00 (64 bytes max length, uint16 LE)
+     * - Byte 12: 0x03 (AttributeIDMessage - carries 256B Notification Message Body)
+     * - Bytes 13..14: 0x00, 0x01 (256 bytes max length, uint16 LE)
      */
     fun buildGetNotificationAttributesCommand(notificationUid: Int): ByteArray {
-        val buffer = ByteBuffer.allocate(11).order(ByteOrder.LITTLE_ENDIAN)
+        val buffer = ByteBuffer.allocate(15).order(ByteOrder.LITTLE_ENDIAN)
         buffer.put(COMMAND_ID_GET_NOTIFICATION_ATTRIBUTES)
         buffer.putInt(notificationUid)
 
-        // Attribute 0: AppIdentifier (0x00) - no max length parameter in ANCS spec
-        buffer.put(ATTRIBUTE_ID_APP_IDENTIFIER.toByte())
+        // Attribute 0: AppIdentifier (no 2-byte length field allowed by ANCS spec)
+        buffer.put(ATTRIBUTE_ID_APP_IDENTIFIER)
 
-        // Attribute 1: Title (0x01) + 2-byte Little-Endian max length = 64 (0x40, 0x00)
-        buffer.put(ATTRIBUTE_ID_TITLE.toByte())
-        buffer.put(0x40.toByte())
-        buffer.put(0x00.toByte())
+        // Attribute 1: Title + 2-byte max length (64B LE) -> Caller Name / Sender Name
+        buffer.put(ATTRIBUTE_ID_TITLE)
+        buffer.putShort(MAX_TITLE_BYTES.toShort())
 
-        // Attribute 3: Message (0x03) + 2-byte Little-Endian max length = 256 (0x00, 0x01)
-        buffer.put(ATTRIBUTE_ID_MESSAGE.toByte())
-        buffer.put(0x00.toByte())
-        buffer.put(0x01.toByte())
+        // Attribute 2: Subtitle + 2-byte max length (64B LE) -> Caller ID Phone Number / Thread Subtitle
+        buffer.put(ATTRIBUTE_ID_SUBTITLE)
+        buffer.putShort(MAX_SUBTITLE_BYTES.toShort())
+
+        // Attribute 3: Message + 2-byte max length (256B LE) -> Full Message Body
+        buffer.put(ATTRIBUTE_ID_MESSAGE)
+        buffer.putShort(MAX_MESSAGE_BYTES.toShort())
 
         return buffer.array()
     }
 
     /**
-     * Builds the 6-byte Control Point request for CommandIDPerformNotificationAction (0x02):
-     * - CommandID: 0x02 (1 byte)
-     * - NotificationUID: Little-Endian uint32 (4 bytes)
-     * - ActionID: 0x00 (Positive/Accept) or 0x01 (Negative/Decline) (1 byte)
+     * Constructs the 6-byte Control Point request for CommandIDPerformNotificationAction (0x02):
+     * - Byte 0: 0x02 (CommandIDPerformNotificationAction)
+     * - Bytes 1..4: NotificationUID (4 bytes Little-Endian)
+     * - Byte 5: ActionID (0x00 = Positive/Answer Call, 0x01 = Negative/Decline Call or Dismiss)
      */
-    fun buildPerformNotificationActionCommand(notificationUid: Int, actionId: Byte): ByteArray {
+    fun buildPerformNotificationActionCommand(notificationUid: Int, positive: Boolean): ByteArray {
         val buffer = ByteBuffer.allocate(6).order(ByteOrder.LITTLE_ENDIAN)
         buffer.put(COMMAND_ID_PERFORM_NOTIFICATION_ACTION)
         buffer.putInt(notificationUid)
-        buffer.put(actionId)
+        buffer.put(if (positive) ACTION_ID_POSITIVE else ACTION_ID_NEGATIVE)
         return buffer.array()
     }
 
     /**
-     * Feeds a raw BLE packet from the ANCS Data Source characteristic (22EAC6E9-...)
-     * into the multi-packet reassembly state machine.
+     * Stateful Data Source (UUID 22EAC6E9-24D6-4BB5-BE44-B36ACE7C7BFB) chunk consumer.
+     * Reassembles attributes split across arbitrary BLE MTU notification chunks and prioritizes
+     * AttributeID 0x03 (Message Body, up to 256B) extraction.
      */
-    fun onDataSourcePacketReceived(chunk: ByteArray) {
+    @Synchronized
+    fun onDataSourceChunkReceived(chunk: ByteArray) {
         if (chunk.isEmpty()) return
 
-        val readyNotifications = mutableListOf<AssembledAncsNotification>()
+        // Detect if a fresh GetNotificationAttributes response header starts cleanly at byte 0
+        // when our parser is not mid-attribute, or if the stream was left with trailing bytes
+        if (activeCommandUid == null && rawStreamBuffer.size() > 0) {
+            val buffered = rawStreamBuffer.toByteArray()
+            if (buffered[0] != COMMAND_ID_GET_NOTIFICATION_ATTRIBUTES &&
+                chunk[0] == COMMAND_ID_GET_NOTIFICATION_ATTRIBUTES &&
+                chunk.size >= 5
+            ) {
+                rawStreamBuffer.reset()
+            }
+        }
 
-        synchronized(stateLock) {
-            rawStreamBuffer.write(chunk, 0, chunk.size)
-            val currentBytes = rawStreamBuffer.toByteArray()
-            var readOffset = 0
+        rawStreamBuffer.write(chunk, 0, chunk.size)
+        processStreamBuffer()
+    }
 
-            loop@ while (readOffset < currentBytes.size) {
-                val remaining = currentBytes.size - readOffset
+    @Synchronized
+    private fun processStreamBuffer() {
+        var bytes = rawStreamBuffer.toByteArray()
+        var offset = 0
 
-                when (currentState) {
-                    ParserState.WAITING_FOR_COMMAND_HEADER -> {
-                        // Need 5 bytes: CommandID (1B) + NotificationUID (4B Little-Endian)
-                        if (remaining < 5) break@loop
-
-                        val commandId = currentBytes[readOffset]
-                        if (commandId != COMMAND_ID_GET_NOTIFICATION_ATTRIBUTES) {
-                            readOffset += 1
-                            continue@loop
-                        }
-
-                        activeNotificationUid = ByteBuffer.wrap(currentBytes, readOffset + 1, 4)
-                            .order(ByteOrder.LITTLE_ENDIAN)
-                            .int
-                        collectedAttributes.clear()
-                        readOffset += 5
-                        currentState = ParserState.READING_ATTRIBUTE_HEADER
-                    }
-
-                    ParserState.READING_ATTRIBUTE_HEADER -> {
-                        // Need 3 bytes: AttributeID (1B) + AttributeLength (2B Little-Endian)
-                        if (remaining < 3) break@loop
-
-                        val attrId = currentBytes[readOffset].toInt() and 0xFF
-                        val lenLow = currentBytes[readOffset + 1].toInt() and 0xFF
-                        val lenHigh = currentBytes[readOffset + 2].toInt() and 0xFF
-                        val attrLen = lenLow or (lenHigh shl 8)
-
-                        // Sanity check: prevent corrupted stream from deadlocking on bogus length
-                        if (attrId !in EXPECTED_ATTRIBUTES || attrLen > MAX_VALID_ATTRIBUTE_BYTES) {
-                            // Emit partial attributes if we already decoded Title or AppID, then reset
-                            if (collectedAttributes.isNotEmpty()) {
-                                emitCurrentAttributes(readyNotifications)
-                            } else {
-                                currentState = ParserState.WAITING_FOR_COMMAND_HEADER
-                            }
-                            readOffset += 1
-                            continue@loop
-                        }
-
-                        activeAttributeId = attrId
-                        activeAttributeLength = attrLen
-                        readOffset += 3
-
-                        if (activeAttributeLength == 0) {
-                            collectedAttributes[activeAttributeId] = ""
-                            checkIfAllAttributesComplete(readyNotifications)
-                        } else {
-                            currentState = ParserState.READING_ATTRIBUTE_PAYLOAD
-                        }
-                    }
-
-                    ParserState.READING_ATTRIBUTE_PAYLOAD -> {
-                        // Wait until all activeAttributeLength UTF-8 bytes have arrived across MTU chunks
-                        if (remaining < activeAttributeLength) break@loop
-
-                        val utf8String = String(
-                            currentBytes,
-                            readOffset,
-                            activeAttributeLength,
-                            StandardCharsets.UTF_8
-                        ).trimEnd('\u0000')
-
-                        collectedAttributes[activeAttributeId] = utf8String
-                        readOffset += activeAttributeLength
-                        currentState = ParserState.READING_ATTRIBUTE_HEADER
-
-                        checkIfAllAttributesComplete(readyNotifications)
-                    }
+        while (offset < bytes.size) {
+            // Step 1: Parse 5-byte Response Header [CommandID (1B) + NotificationUID (4B LE)]
+            if (activeCommandUid == null) {
+                // Scan forward to align with COMMAND_ID_GET_NOTIFICATION_ATTRIBUTES (0x00) if needed
+                while (offset < bytes.size && bytes[offset] != COMMAND_ID_GET_NOTIFICATION_ATTRIBUTES) {
+                    offset++
                 }
+                if (bytes.size - offset < 5) break
+
+                val uid = ByteBuffer.wrap(bytes, offset + 1, 4)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+                    .int
+                activeCommandUid = uid
+                collectedAttributes.clear()
+                currentAttributeId = null
+                currentAttributeExpectedLen = -1
+                offset += 5
             }
 
-            // Compact buffer to retain only unconsumed trailing bytes for the next BLE packet
+            // Step 2: Parse 3-byte Attribute Header [AttributeID (1B) + AttributeLength (2B LE)]
+            if (currentAttributeId == null) {
+                if (bytes.size - offset < 3) break
+                val attrId = bytes[offset].toInt() and 0xFF
+                val attrLen = ByteBuffer.wrap(bytes, offset + 1, 2)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+                    .short.toInt() and 0xFFFF
+
+                // Sanity check against corrupted BLE stream alignment
+                if (attrId !in 0..7 || attrLen > 1024) {
+                    // Flush current partial notification if we already extracted useful attributes
+                    if (collectedAttributes.isNotEmpty()) {
+                        emitCurrentActiveNotification()
+                    } else {
+                        resetCurrentNotificationState()
+                    }
+                    offset = bytes.size
+                    break
+                }
+
+                currentAttributeId = attrId
+                currentAttributeExpectedLen = attrLen
+                offset += 3
+            }
+
+            // Step 3: Read UTF-8 payload bytes for the active attribute
+            val expectedLen = currentAttributeExpectedLen
+            val attrId = currentAttributeId ?: break
+
+            if (expectedLen == 0) {
+                collectedAttributes[attrId] = ""
+                currentAttributeId = null
+                currentAttributeExpectedLen = -1
+                if (checkIfAllAttributesComplete()) {
+                    emitCurrentActiveNotification()
+                }
+                continue
+            }
+
+            if (bytes.size - offset < expectedLen) {
+                // Wait for the next BLE MTU packet to deliver remaining UTF-8 bytes
+                break
+            }
+
+            val utf8String = decodeCleanUtf8(bytes, offset, expectedLen)
+            collectedAttributes[attrId] = utf8String
+            offset += expectedLen
+
+            currentAttributeId = null
+            currentAttributeExpectedLen = -1
+
+            if (checkIfAllAttributesComplete()) {
+                emitCurrentActiveNotification()
+            }
+        }
+
+        // Retain only unconsumed trailing bytes in the stream buffer
+        if (offset > 0) {
+            val remainingCount = bytes.size - offset
             rawStreamBuffer.reset()
-            if (readOffset < currentBytes.size) {
-                rawStreamBuffer.write(currentBytes, readOffset, currentBytes.size - readOffset)
+            if (remainingCount > 0) {
+                rawStreamBuffer.write(bytes, offset, remainingCount)
             }
         }
-
-        // Dispatch completed notifications outside synchronized lock
-        for (notification in readyNotifications) {
-            onNotificationAssembled(notification)
-        }
-    }
-
-    private fun checkIfAllAttributesComplete(outList: MutableList<AssembledAncsNotification>) {
-        if (collectedAttributes.keys.containsAll(EXPECTED_ATTRIBUTES)) {
-            emitCurrentAttributes(outList)
-        }
-    }
-
-    private fun emitCurrentAttributes(outList: MutableList<AssembledAncsNotification>) {
-        val uid = activeNotificationUid
-        val sourceEvent = pendingEvents[uid]
-        val bundleId = collectedAttributes[ATTRIBUTE_ID_APP_IDENTIFIER].orEmpty()
-        val appName = resolveAppDisplayName(bundleId)
-        val rawTitle = collectedAttributes[ATTRIBUTE_ID_TITLE].orEmpty()
-        val rawMessage = collectedAttributes[ATTRIBUTE_ID_MESSAGE].orEmpty()
-
-        val finalTitle = when {
-            rawTitle.isNotBlank() -> rawTitle
-            sourceEvent?.categoryId == CATEGORY_ID_INCOMING_CALL -> "Incoming iPhone Call"
-            sourceEvent?.categoryId == CATEGORY_ID_MISSED_CALL -> "Missed Call"
-            else -> appName
-        }
-
-        val finalMessage = when {
-            rawMessage.isNotBlank() -> rawMessage
-            sourceEvent?.categoryId == CATEGORY_ID_INCOMING_CALL -> "Incoming call on iPhone via ANCS"
-            sourceEvent?.categoryId == CATEGORY_ID_MISSED_CALL -> "Missed call on iPhone"
-            else -> "Notification from $appName"
-        }
-
-        outList.add(
-            AssembledAncsNotification(
-                notificationUid = uid,
-                categoryId = sourceEvent?.categoryId ?: CATEGORY_ID_OTHER,
-                eventFlags = sourceEvent?.eventFlags ?: 0,
-                appBundleId = bundleId,
-                appDisplayName = appName,
-                title = finalTitle,
-                message = finalMessage,
-                isFallbackOnly = false
-            )
-        )
-
-        collectedAttributes.clear()
-        currentState = ParserState.WAITING_FOR_COMMAND_HEADER
     }
 
     /**
-     * Resets parser state upon BLE disconnect or user reset.
+     * Because our Control Point command requests attributes in strict order:
+     * 0x00 (AppIdentifier) -> 0x01 (Title) -> 0x02 (Subtitle) -> 0x03 (Message),
+     * as soon as AttributeID 0x03 (Message) has been parsed, the notification is 100% complete!
      */
-    fun reset() {
-        synchronized(stateLock) {
-            rawStreamBuffer.reset()
-            collectedAttributes.clear()
-            currentState = ParserState.WAITING_FOR_COMMAND_HEADER
-            activeNotificationUid = 0
-            activeAttributeId = 0
-            activeAttributeLength = 0
+    private fun checkIfAllAttributesComplete(): Boolean {
+        return collectedAttributes.containsKey(ATTRIBUTE_ID_MESSAGE.toInt()) ||
+            EXPECTED_ATTRIBUTES.all { collectedAttributes.containsKey(it) }
+    }
+
+    /**
+     * Flushes any partially assembled notification when the BLE Data Source stream goes idle
+     * (e.g., if iOS omitted a trailing attribute or truncated the final MTU packet at the 256B boundary).
+     * Ensures Attribute 0x03 (Message Body) and Caller ID attributes are still delivered to the UI.
+     */
+    @Synchronized
+    fun flushPendingPartialAttributes(): AssembledAncsNotification? {
+        val uid = activeCommandUid ?: return null
+
+        // If we are mid-way through reading an attribute (such as a truncated 0x03 Message Body),
+        // salvage all available UTF-8 bytes currently sitting in rawStreamBuffer.
+        val pendingAttrId = currentAttributeId
+        if (pendingAttrId != null && rawStreamBuffer.size() > 0) {
+            val partialBytes = rawStreamBuffer.toByteArray()
+            val takeLen = minOf(partialBytes.size, currentAttributeExpectedLen.coerceAtLeast(0))
+            if (takeLen > 0) {
+                collectedAttributes[pendingAttrId] = decodeCleanUtf8(partialBytes, 0, takeLen)
+            }
         }
-        pendingEvents.clear()
+
+        if (collectedAttributes.isEmpty()) {
+            resetCurrentNotificationState()
+            rawStreamBuffer.reset()
+            return null
+        }
+
+        val assembled = buildAssembledNotification(uid)
+        resetCurrentNotificationState()
+        rawStreamBuffer.reset()
+        onNotificationAssembled(assembled)
+        return assembled
+    }
+
+    @Synchronized
+    fun hasPendingAssembly(): Boolean {
+        return activeCommandUid != null
+    }
+
+    private fun decodeCleanUtf8(bytes: ByteArray, offset: Int, length: Int): String {
+        if (length <= 0) return ""
+        return String(bytes, offset, length, StandardCharsets.UTF_8)
+            .trimEnd('\u0000')
+            .trim()
+    }
+
+    private fun buildAssembledNotification(uid: Int): AssembledAncsNotification {
+        val meta = sourceMetadataByUid[uid]
+        val categoryId = meta?.categoryId ?: CATEGORY_ID_OTHER
+        val appId = collectedAttributes[ATTRIBUTE_ID_APP_IDENTIFIER.toInt()].orEmpty()
+        val rawTitle = collectedAttributes[ATTRIBUTE_ID_TITLE.toInt()].orEmpty()
+        val rawSubtitle = collectedAttributes[ATTRIBUTE_ID_SUBTITLE.toInt()].orEmpty()
+        val rawMessage = collectedAttributes[ATTRIBUTE_ID_MESSAGE.toInt()].orEmpty()
+
+        // Prioritize Attribute 0x03 (Message Body); if iOS placed call details or short text in Subtitle/Title,
+        // preserve both Caller Name (title), Caller Phone Number (subtitle), and Message Body (message).
+        val resolvedTitle = when {
+            rawTitle.isNotBlank() -> rawTitle
+            rawSubtitle.isNotBlank() -> rawSubtitle
+            categoryId == CATEGORY_ID_INCOMING_CALL -> "Incoming Call"
+            else -> resolveFriendlyAppName(appId, categoryId)
+        }
+
+        val resolvedSubtitle = when {
+            rawTitle.isNotBlank() && rawSubtitle.isNotBlank() && rawSubtitle != rawTitle -> rawSubtitle
+            categoryId == CATEGORY_ID_INCOMING_CALL && rawMessage.isNotBlank() &&
+                rawMessage != resolvedTitle -> rawMessage
+            else -> ""
+        }
+
+        val resolvedMessage = when {
+            rawMessage.isNotBlank() -> rawMessage
+            rawSubtitle.isNotBlank() && rawSubtitle != resolvedTitle -> rawSubtitle
+            categoryId == CATEGORY_ID_INCOMING_CALL ->
+                if (resolvedSubtitle.isNotBlank()) "Caller ID: $resolvedSubtitle" else "Incoming Call on iPhone"
+            else -> resolvedTitle
+        }
+
+        return AssembledAncsNotification(
+            notificationUid = uid,
+            categoryId = categoryId,
+            eventFlags = meta?.eventFlags ?: 0,
+            appIdentifier = appId.ifBlank { "com.apple.Unknown" },
+            title = resolvedTitle,
+            subtitle = resolvedSubtitle,
+            message = resolvedMessage,
+            hasPositiveAction = meta?.hasPositiveAction ?: (categoryId == CATEGORY_ID_INCOMING_CALL),
+            hasNegativeAction = meta?.hasNegativeAction ?: true
+        )
+    }
+
+    private fun emitCurrentActiveNotification() {
+        val uid = activeCommandUid ?: return
+        val assembled = buildAssembledNotification(uid)
+        resetCurrentNotificationState()
+        onNotificationAssembled(assembled)
+    }
+
+    private fun resolveFriendlyAppName(appId: String, categoryId: Int): String {
+        val lower = appId.lowercase()
+        return when {
+            lower.contains("mobilephone") || lower.contains("incallservice") ||
+                categoryId == CATEGORY_ID_INCOMING_CALL -> "iPhone Call"
+            lower.contains("mobilesms") -> "iMessage"
+            lower.contains("whatsapp") -> "WhatsApp"
+            lower.contains("telegram") -> "Telegram"
+            lower.contains("instagram") -> "Instagram"
+            lower.contains("gmail") || lower.contains("mobilemail") -> "Mail"
+            lower.contains("slack") -> "Slack"
+            lower.contains("teams") -> "Teams"
+            else -> "iOS Alert"
+        }
+    }
+
+    private fun resetCurrentNotificationState() {
+        activeCommandUid = null
+        currentAttributeId = null
+        currentAttributeExpectedLen = -1
+        collectedAttributes.clear()
+    }
+
+    @Synchronized
+    fun resetParser() {
+        rawStreamBuffer.reset()
+        resetCurrentNotificationState()
     }
 }

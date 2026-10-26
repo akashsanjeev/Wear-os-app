@@ -93,8 +93,9 @@ export default function App() {
   const [customBundleId, setCustomBundleId] = useState<string>('net.whatsapp.WhatsApp');
   const [customCategoryId, setCustomCategoryId] = useState<number>(4);
   const [customTitle, setCustomTitle] = useState<string>('Elena Rostova');
+  const [customSubtitle, setCustomSubtitle] = useState<string>('+1 (415) 890-4321');
   const [customMessage, setCustomMessage] = useState<string>(
-    'Hey! Are we still meeting at 6:30 PM? This full message woke up your Wear OS 5.0 OnePlus Watch 2R screen!'
+    'Hey! Are we still meeting at 6:30 PM? This full 256-byte ANCS Attribute 0x03 message body woke up your Wear OS 5.0 OnePlus Watch 2R screen!'
   );
   const [customPreExisting, setCustomPreExisting] = useState<boolean>(false);
 
@@ -108,8 +109,9 @@ export default function App() {
       appBundleId: 'net.whatsapp.WhatsApp',
       appDisplayName: 'WhatsApp',
       title: 'Alex Rivera',
+      subtitle: '+1 (415) 602-9811',
       message:
-        'Hey! Are we still meeting at 6:30 PM for coffee? Let me know when your OnePlus Watch 2R gets this over BLE ANCS!',
+        'Hey! Are we still meeting at 6:30 PM for coffee? Let me know when your OnePlus Watch 2R gets this full 256-byte ANCS Attribute 0x03 payload over the always-on BLE bridge!',
       timestamp: '20:25:04',
       wakeBehavior: 'Screen Wake + Full-Screen Message Card',
     },
@@ -451,6 +453,7 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
     categoryCount: number;
     appBundleId: string;
     title: string;
+    subtitle?: string;
     message: string;
   }) => {
     if (watchState !== 'Bonded - Listening to ANCS') {
@@ -460,6 +463,7 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
     const uid = nextUid;
     setNextUid((prev) => prev + 1);
     const ts = nowTime();
+    const resolvedSubtitle = preset.subtitle ?? '';
 
     const notifSource8Bytes = buildNotificationSource8BytePacket(
       preset.eventId,
@@ -489,11 +493,12 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
       return;
     }
 
-    const controlPoint11Bytes = buildControlPointGetAttributesRequest(uid);
+    const controlPoint15Bytes = buildControlPointGetAttributesRequest(uid);
     const dataSourceChunks = buildFragmentedDataSourceChunks(
       uid,
       preset.appBundleId,
       preset.title,
+      resolvedSubtitle,
       preset.message,
       simulatedMtu
     );
@@ -508,8 +513,8 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
           timestamp: ts,
           direction: 'iOS -> Watch',
           characteristic: 'Data Source (22EA...)',
-          summary: `MTU=${simulatedMtu}B Fragment ${chunkIndex}/${dataSourceChunks.length} -> AncsPacketParser Reassembler${
-            chunkIndex === dataSourceChunks.length ? ' [COMPLETE -> WAKE SCREEN]' : ''
+          summary: `MTU=${simulatedMtu}B Fragment ${chunkIndex}/${dataSourceChunks.length} -> AncsPacketParser 0x03 Reassembler${
+            chunkIndex === dataSourceChunks.length ? ' [0x03 COMPLETE -> WAKE SCREEN]' : ''
           }`,
           hexBytes: bytesToHex(chunk),
           byteCount: chunk.length,
@@ -521,9 +526,9 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
       timestamp: ts,
       direction: 'Watch -> iOS',
       characteristic: 'Control Point (69D1...)',
-      summary: `CommandIDGetNotificationAttributes (0x00) UID=${uid} [AppID, Title 64B, Message 256B]`,
-      hexBytes: bytesToHex(controlPoint11Bytes),
-      byteCount: controlPoint11Bytes.length,
+      summary: `CommandIDGetNotificationAttributes (0x00) UID=${uid} [AppID 0x00, Title 0x01(64B), Subtitle 0x02(64B CallerID), Message 0x03(256B)]`,
+      hexBytes: bytesToHex(controlPoint15Bytes),
+      byteCount: controlPoint15Bytes.length,
     });
 
     newLogs.push({
@@ -543,7 +548,7 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
       ? 'Screen Wake + Continuous Call Vibe'
       : 'Screen Wake + Full-Screen Message Card';
 
-    showWatchToast(isCall ? 'Screen Woke · Incoming Call' : 'Screen Woke · Message Card');
+    showWatchToast(isCall ? 'Screen Woke · Caller ID Ready' : 'Screen Woke · 0x03 Message Card');
 
     const assembledAlert: WatchAlertItem = {
       notificationUid: uid,
@@ -553,6 +558,7 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
       appBundleId: preset.appBundleId,
       appDisplayName: resolveBundleDisplayName(preset.appBundleId),
       title: preset.title,
+      subtitle: resolvedSubtitle,
       message: preset.message,
       timestamp: ts,
       wakeBehavior,
@@ -693,14 +699,14 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
             <div className="space-y-3 max-w-3xl">
               <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-emerald-400">
                 <CheckCircle2 className="w-4 h-4" />
-                <span>v2 ANCS Delivery Fix Ready · Auto Re-Sync (+3.5s/+8.5s) + Queue Lock + Live NS/DS Telemetry</span>
+                <span>v3 Ready · Attribute 0x03 (256B Body) + Caller ID (Name &amp; Phone #) + Always-Alive BLE Heartbeat</span>
               </div>
               <h1 className="text-2xl sm:text-3xl font-bold text-white font-display">
-                Sync &amp; Download Updated <code className="text-sky-300 font-mono">OP2R-iOS-Bridge-WearOS5.apk</code> (v2)
+                Sync &amp; Download Updated <code className="text-sky-300 font-mono">OP2R-iOS-Bridge-WearOS5.apk</code> (v3)
               </h1>
               <p className="text-sm text-slate-300 leading-relaxed">
-                We fixed why <code className="text-emerald-300 font-mono">&ldquo;Bonded - Listening to ANCS&rdquo;</code> wasn&rsquo;t showing incoming calls or messages:
-                the watch now runs <strong>automatic Post-Bond CCCD Re-Subscription waves (+3.5s &amp; +8.5s)</strong> and <code className="text-sky-300 font-mono">onServiceChanged</code> so iOS&rsquo;s <em>Share System Notifications</em> stream activates after pairing, locks the <code className="text-sky-300 font-mono">Control Point</code> queue until <code className="text-sky-300 font-mono">Data Source</code> finishes, rings <strong>immediately on 8-byte call packets</strong>, and adds a live <code className="text-emerald-300 font-mono">NS / DS</code> packet counter + <strong>Test + Sync</strong> button on your watch!
+                This v3 build resolves generic message placeholders, missing Caller ID, and idle Bluetooth disconnects:
+                <code className="text-sky-300 font-mono"> AncsPacketParser.kt</code> now requests <strong>Attribute 0x01 (Title 64B)</strong>, <strong>Attribute 0x02 (Subtitle / Caller Phone # 64B)</strong>, and prioritizes <strong>Attribute 0x03 (Message Body 256B)</strong> with GATT BUSY retry protection + 350ms stream flush, while <code className="text-emerald-300 font-mono">AncsBridgeService.kt</code> runs an <strong>Apple Watch-style Always-Alive 20s RSSI Heartbeat + Continuous Solicited ANCS Auto-Reconnect Watchdog</strong>.
               </p>
 
               {/* Permanent 1-Click Direct Links for akashsanjeev/Wear-os-app */}
@@ -937,12 +943,17 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                             </div>
                           </div>
 
-                          {/* 3. Equator Caller Info (76% width) */}
-                          <div className="w-[76%] my-1.5 space-y-1">
+                          {/* 3. Equator Caller Info (76% width): Caller Name (0x01) + Phone Number Subtitle (0x02) */}
+                          <div className="w-[76%] my-1.5 space-y-0.5">
                             <div className="text-sm font-bold text-white font-display truncate">
                               {activePopupNotification.title}
                             </div>
-                            <div className="text-[11px] text-slate-300 truncate">
+                            {activePopupNotification.subtitle && (
+                              <div className="text-[11.5px] font-mono font-bold text-sky-400 truncate">
+                                ID: {activePopupNotification.subtitle}
+                              </div>
+                            )}
+                            <div className="text-[10.5px] text-slate-300 truncate">
                               {activePopupNotification.message}
                             </div>
                           </div>
@@ -991,18 +1002,23 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                           className="absolute inset-0 z-20 bg-[#060911] flex flex-col items-center justify-center text-center"
                         >
                           {/* 1. Tapered Top App Badge (50% of watch width) */}
-                          <div className="w-[50%] px-2.5 py-0.5 rounded-full bg-[#14263B] border border-sky-400/60 text-sky-300 text-[10px] font-mono flex items-center justify-center gap-1 truncate mb-1.5">
+                          <div className="w-[50%] px-2.5 py-0.5 rounded-full bg-[#14263B] border border-sky-400/60 text-sky-300 text-[10px] font-mono flex items-center justify-center gap-1 truncate mb-1">
                             <MessageSquareText className="w-3 h-3 text-sky-400 shrink-0" />
                             <span className="truncate">{activePopupNotification.appDisplayName}</span>
                           </div>
 
-                          {/* 2. Sender / Title (72% of watch width) */}
-                          <div className="w-[72%] text-[13.5px] font-bold text-white font-display truncate mb-2">
+                          {/* 2. Sender / Title (0x01) + Subtitle / Caller ID (0x02) */}
+                          <div className="w-[72%] text-[13.5px] font-bold text-white font-display truncate">
                             {activePopupNotification.title}
                           </div>
+                          {activePopupNotification.subtitle && (
+                            <div className="w-[72%] text-[10.5px] font-mono text-sky-400 truncate mb-1">
+                              {activePopupNotification.subtitle}
+                            </div>
+                          )}
 
-                          {/* 3. Inscribed Equator Scrollable Message Box (80% of watch width, 118px height) */}
-                          <div className="w-[80%] h-[118px] p-3 rounded-2xl bg-[#111827] border border-slate-800 text-[12px] text-slate-100 leading-relaxed overflow-y-auto flex items-center justify-center text-center shadow-inner mb-2.5">
+                          {/* 3. Inscribed Equator Scrollable Message Box (80% of watch width, 112px height) */}
+                          <div className="w-[80%] h-[112px] p-3 rounded-2xl bg-[#111827] border border-slate-800 text-[12px] text-slate-100 leading-relaxed overflow-y-auto flex items-center justify-center text-center shadow-inner mb-2">
                             <div className="max-h-full overflow-y-auto">
                               {activePopupNotification.message}
                             </div>
@@ -1249,7 +1265,7 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                     <span>Custom iOS Notification Message Composer</span>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                     <div>
                       <label className="block text-[11px] text-slate-400 mb-1">
                         Bundle ID (0x00)
@@ -1277,8 +1293,8 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                         onChange={(e) => setCustomCategoryId(Number(e.target.value))}
                         className="w-full px-3 py-2 text-xs font-mono bg-[#0B0F17] border border-slate-800 rounded-xl text-slate-100 focus:outline-none focus:border-sky-500"
                       >
-                        <option value={4}>4 — Social / Message (Wakes Screen)</option>
-                        <option value={1}>1 — Incoming Call (Wakes Screen)</option>
+                        <option value={4}>4 — Social / Message (0x03 Body)</option>
+                        <option value={1}>1 — Incoming Call (Caller ID)</option>
                         <option value={2}>2 — Missed Call</option>
                         <option value={6}>6 — Email</option>
                       </select>
@@ -1286,13 +1302,26 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
 
                     <div>
                       <label className="block text-[11px] text-slate-400 mb-1">
-                        Sender / Title (0x01, Max 64B)
+                        Caller / Title (0x01, 64B)
                       </label>
                       <input
                         type="text"
                         value={customTitle}
                         onChange={(e) => setCustomTitle(e.target.value)}
                         className="w-full px-3 py-2 text-xs bg-[#0B0F17] border border-slate-800 rounded-xl text-slate-100 focus:outline-none focus:border-sky-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">
+                        Caller ID / Subtitle (0x02, 64B)
+                      </label>
+                      <input
+                        type="text"
+                        value={customSubtitle}
+                        onChange={(e) => setCustomSubtitle(e.target.value)}
+                        placeholder="+1 (415) 890-4321"
+                        className="w-full px-3 py-2 text-xs font-mono bg-[#0B0F17] border border-slate-800 rounded-xl text-slate-100 focus:outline-none focus:border-sky-500"
                       />
                     </div>
                   </div>
@@ -1329,6 +1358,7 @@ Target iOS Source: **iPhone 14 (iOS)** via native Apple Notification Center Serv
                           categoryCount: 1,
                           appBundleId: customBundleId,
                           title: customTitle || 'iOS Alert',
+                          subtitle: customSubtitle,
                           message: customMessage || 'Notification via BLE ANCS',
                         })
                       }
