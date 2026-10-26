@@ -26,9 +26,10 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.lifecycleScope
-import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -38,9 +39,9 @@ import kotlin.math.abs
  * Implements a 2-Page Horizontal Swipe UI inside the inscribed circular safe area:
  * - Page 1 (Main Watch Face - Zero Accidental Presses):
  *   Digital Clock, Date, Connection Status, Missed Calls Counter Pill, Messages Counter Pill,
- *   and a single "Clear All" button.
+ *   and a single "Clear Counts" button.
  * - Page 2 (Swipe Side - Controls & Raw Diagnostics):
- *   Dedicated "Advertise iPhone (A)" button (Mode B removed), "Re-Sync ANCS", "Test Alert",
+ *   Dedicated "Advertise iPhone (Mode A)" button (Mode B removed), "Re-Sync", "Test Alert",
  *   Live Raw ANCS Attribute Inspector (Title 0x01, Subtitle 0x02, Message 0x03, AppID 0x00),
  *   and BLE Telemetry Logs.
  * - Full-Screen Popup Overlay:
@@ -48,6 +49,9 @@ import kotlin.math.abs
  *   and Full 256-Byte Message Body cards.
  */
 class MainActivity : ComponentActivity() {
+
+    private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var stateCollectorJob: Job? = null
 
     // Page navigation state (0 = Page 1 Clock & Counters, 1 = Page 2 Controls & Diagnostics)
     private var currentPageIndex: Int = 0
@@ -115,9 +119,19 @@ class MainActivity : ComponentActivity() {
         enableWakeAndShowWhenLocked()
         setupHorizontalSwipeDetector()
         setContentView(buildCircularTwoPageWatchLayout())
-        observeBridgeState()
         ensurePermissionsAndStartBridge()
         handleIncomingPopupIntent(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        startObservingBridgeState()
+    }
+
+    override fun onStop() {
+        stateCollectorJob?.cancel()
+        stateCollectorJob = null
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -127,7 +141,6 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
-        // Intercept horizontal swipe gestures when the full-screen alert popup is not covering the screen
         if (::popupOverlayContainer.isInitialized &&
             popupOverlayContainer.visibility != View.VISIBLE &&
             ::swipeGestureDetector.isInitialized
@@ -152,11 +165,9 @@ class MainActivity : ComponentActivity() {
                     val deltaY = e2.y - e1.y
                     if (abs(deltaX) > abs(deltaY) && abs(deltaX) > dp(38) && abs(velocityX) > 180f) {
                         if (deltaX < 0 && currentPageIndex == 0) {
-                            // Swipe Left -> Go to Page 2 (Controls & Diagnostics)
                             switchToPage(1)
                             return true
                         } else if (deltaX > 0 && currentPageIndex == 1) {
-                            // Swipe Right -> Go back to Page 1 (Clock & Counters)
                             switchToPage(0)
                             return true
                         }
@@ -203,7 +214,6 @@ class MainActivity : ComponentActivity() {
     private fun buildCircularTwoPageWatchLayout(): View {
         val metrics = resources.displayMetrics
         val screenMinPx = minOf(metrics.widthPixels, metrics.heightPixels)
-        // Inscribed square margin for a 466x466 circle: ~14.65% of diameter
         val inscribedInsetPx = (screenMinPx * 0.1465f).toInt().coerceAtLeast(dp(26))
 
         val rootFrame = FrameLayout(this).apply {
@@ -251,7 +261,6 @@ class MainActivity : ComponentActivity() {
             setPadding(0, 0, 0, dp(6))
         }
 
-        // 2-Column Counter Badges: Missed Calls & Messages
         val countersRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -259,7 +268,7 @@ class MainActivity : ComponentActivity() {
         }
 
         page1MissedCallsBadge = TextView(this).apply {
-            text = "0 Calls"
+            text = "0 Missed"
             setTextColor(Color.parseColor("#FDA4AF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.DEFAULT_BOLD
@@ -390,7 +399,6 @@ class MainActivity : ComponentActivity() {
             setPadding(0, dp(1), 0, dp(5))
         }
 
-        // Single Full-Width Mode A Button (Scan Beacon B removed per user request)
         val advertiseModeAButton = createWatchActionButton(
             label = "Advertise iPhone (Mode A)",
             bgColorHex = "#0284C7"
@@ -398,7 +406,6 @@ class MainActivity : ComponentActivity() {
             startBridgeService(AncsBridgeService.ACTION_START_MODE_A_PERIPHERAL)
         }
 
-        // Diagnostic Controls Row: Re-Sync ANCS + Test Alert
         val diagRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -426,7 +433,6 @@ class MainActivity : ComponentActivity() {
             marginStart = dp(4)
         })
 
-        // Raw ANCS Attribute Inspector Box (verifies iOS Contact Name, Subtitle, Message, AppID)
         rawAttributesBoxView = TextView(this).apply {
             text = "RAW ANCS INSPECTOR\nApp(0x00): —\nTitle(0x01): —\nSub(0x02): —\nMsg(0x03): —"
             setTextColor(Color.parseColor("#E2E8F0"))
@@ -547,7 +553,6 @@ class MainActivity : ComponentActivity() {
             )
         )
 
-        // Full-Screen Inscribed Notification & Incoming Call Popup Overlay
         popupOverlayContainer = buildCircularInscribedNotificationPopup(inscribedInsetPx)
         rootFrame.addView(
             popupOverlayContainer,
@@ -813,58 +818,55 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun observeBridgeState() {
-        lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-                AncsBridgeService.bridgeState.collect { state ->
-                    // Update Page 1 (Clock & Counters)
-                    val isConnected = state.isAncsSubscribed
-                    page1ConnectionPill.text = if (isConnected) {
-                        "● CONNECTED • ${state.connectedDeviceName ?: "iPhone"}"
-                    } else {
-                        "● ${state.statusText}"
+    private fun startObservingBridgeState() {
+        stateCollectorJob?.cancel()
+        stateCollectorJob = uiScope.launch {
+            AncsBridgeService.bridgeState.collect { state ->
+                val isConnected = state.isAncsSubscribed
+                page1ConnectionPill.text = if (isConnected) {
+                    "● CONNECTED • ${state.connectedDeviceName ?: "iPhone"}"
+                } else {
+                    "● ${state.statusText}"
+                }
+                page1ConnectionPill.setTextColor(
+                    Color.parseColor(if (isConnected) "#10B981" else "#38BDF8")
+                )
+
+                page1MissedCallsBadge.text = "${state.missedCallCount} Missed"
+                page1MessagesBadge.text = "${state.unreadMessageCount} Msgs"
+
+                val last = state.lastNotification
+                if (last != null) {
+                    page1LastPreviewText.text = "${last.appDisplayName}: ${last.title} — ${last.message}"
+
+                    val signature =
+                        "${last.notificationUid}:${last.title}:${last.subtitle}:${last.message}"
+                    if (signature != lastShownPopupSignature) {
+                        lastShownPopupSignature = signature
+                        showNotificationPopupCard(last)
                     }
-                    page1ConnectionPill.setTextColor(
-                        Color.parseColor(if (isConnected) "#10B981" else "#38BDF8")
-                    )
+                } else {
+                    page1LastPreviewText.text = "No unread alerts"
+                }
 
-                    page1MissedCallsBadge.text = "${state.missedCallCount} Missed"
-                    page1MessagesBadge.text = "${state.unreadMessageCount} Msgs"
+                statusBadgeView.text = state.statusText
+                val devName = state.connectedDeviceName ?: "No iPhone"
+                val bondTag = if (state.isBonded) "Bonded" else "Unbonded"
+                val rssiTag = if (state.lastRssi != 0) " • ${state.lastRssi}dBm" else ""
+                deviceInfoView.text = "$devName ($bondTag) • MTU ${state.negotiatedMtu}$rssiTag"
+                telemetryStatsView.text =
+                    "Src:${state.rxSourcePackets} • 0x03:${state.rxDataPackets} • HB:${state.keepAlivePings}"
 
-                    val last = state.lastNotification
-                    if (last != null) {
-                        page1LastPreviewText.text = "${last.appDisplayName}: ${last.title} — ${last.message}"
+                rawAttributesBoxView.text = buildString {
+                    append("RAW ANCS INSPECTOR\n")
+                    append("App(0x00): ${state.lastRawAppId}\n")
+                    append("Title(0x01): ${state.lastRawTitle}\n")
+                    append("Sub(0x02): ${state.lastRawSubtitle}\n")
+                    append("Msg(0x03): ${state.lastRawMessage.take(80)}")
+                }
 
-                        val signature =
-                            "${last.notificationUid}:${last.title}:${last.subtitle}:${last.message}"
-                        if (signature != lastShownPopupSignature) {
-                            lastShownPopupSignature = signature
-                            showNotificationPopupCard(last)
-                        }
-                    } else {
-                        page1LastPreviewText.text = "No unread alerts"
-                    }
-
-                    // Update Page 2 (Controls & Raw ANCS Inspector)
-                    statusBadgeView.text = state.statusText
-                    val devName = state.connectedDeviceName ?: "No iPhone"
-                    val bondTag = if (state.isBonded) "Bonded" else "Unbonded"
-                    val rssiTag = if (state.lastRssi != 0) " • ${state.lastRssi}dBm" else ""
-                    deviceInfoView.text = "$devName ($bondTag) • MTU ${state.negotiatedMtu}$rssiTag"
-                    telemetryStatsView.text =
-                        "Src:${state.rxSourcePackets} • 0x03:${state.rxDataPackets} • HB:${state.keepAlivePings}"
-
-                    rawAttributesBoxView.text = buildString {
-                        append("RAW ANCS INSPECTOR\n")
-                        append("App(0x00): ${state.lastRawAppId}\n")
-                        append("Title(0x01): ${state.lastRawTitle}\n")
-                        append("Sub(0x02): ${state.lastRawSubtitle}\n")
-                        append("Msg(0x03): ${state.lastRawMessage.take(80)}")
-                    }
-
-                    if (state.diagnosticLog.isNotEmpty()) {
-                        logFeedView.text = state.diagnosticLog.take(6).joinToString("\n") { "• $it" }
-                    }
+                if (state.diagnosticLog.isNotEmpty()) {
+                    logFeedView.text = state.diagnosticLog.take(6).joinToString("\n") { "• $it" }
                 }
             }
         }

@@ -300,13 +300,12 @@ class AncsBridgeService : Service() {
         )
         try {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            // Cancel all call & message notifications while keeping the foreground service notification
             nm.activeNotifications.forEach { statusBarNotif ->
                 if (statusBarNotif.id != FOREGROUND_NOTIFICATION_ID) {
                     nm.cancel(statusBarNotif.id)
                 }
             }
-        } catch (_: Exception) {}
+        } catch (ignored: Exception) {}
         appendLog("Cleared all missed call & message counters")
     }
 
@@ -399,7 +398,6 @@ class AncsBridgeService : Service() {
 
         ensureGattServerStarted()
 
-        // Also check if we already have a bonded iPhone to connect to immediately
         if (activeGatt == null) {
             val bondedIphone = findBondedIphoneDevice()
             if (bondedIphone != null) {
@@ -455,7 +453,7 @@ class AncsBridgeService : Service() {
         if (!isAdvertisingModeA) return
         try {
             bleAdvertiser?.stopAdvertising(modeAAdvertiseCallback)
-        } catch (_: Exception) {
+        } catch (ignored: Exception) {
         } finally {
             isAdvertisingModeA = false
         }
@@ -539,7 +537,7 @@ class AncsBridgeService : Service() {
         if (gatt != null) {
             try {
                 gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
-            } catch (_: Exception) {}
+            } catch (ignored: Exception) {}
             gatt.discoverServices()
         } else if (device != null) {
             connectOrInitializeAncsGattClient(device, useAutoConnect = false)
@@ -548,10 +546,6 @@ class AncsBridgeService : Service() {
         }
     }
 
-    /**
-     * Injects a realistic multi-packet ANCS Notification Source + 256-byte Data Source burst
-     * to test the watch popup, Contact Name + Phone Number resolution, and counters.
-     */
     private fun triggerSimulatedTestAlert() {
         val testUid = (9000..9999).random()
         appendLog("Injecting test ANCS alert (UID #$testUid)...")
@@ -750,9 +744,6 @@ class AncsBridgeService : Service() {
                 val activeOp = synchronized(gattQueueLock) { activeInFlightOperation }
                 if (activeOp is GattOperation.RequestNotificationAttributes) {
                     if (status == BluetoothGatt.GATT_SUCCESS) {
-                        // CRITICAL ANCS RULE: Do NOT release the GATT queue lock yet!
-                        // Wait until Data Source finishes delivering the attributes for this UID
-                        // (or 900ms max) so a subsequent Control Point command never aborts Data Source!
                         scheduleGattWatchdog(
                             label = "AwaitDataSource UID=${activeOp.notificationUid}",
                             timeoutMs = 900L
@@ -812,7 +803,6 @@ class AncsBridgeService : Service() {
     private fun enqueueNotificationAttributesRequest(notificationUid: Int, forceRequery: Boolean = false) {
         val controlPoint = controlPointCharacteristic ?: return
         synchronized(gattQueueLock) {
-            // Avoid stacking duplicate GetNotificationAttributes requests for the same UID
             val alreadyQueued = gattQueue.any {
                 it is GattOperation.RequestNotificationAttributes && it.notificationUid == notificationUid
             }
@@ -870,7 +860,6 @@ class AncsBridgeService : Service() {
     private fun scheduleGattWatchdog(label: String, timeoutMs: Long = 2200L) {
         cancelGattWatchdog()
         val runnable = Runnable {
-            // Before releasing the lock, flush any partial Data Source attributes in the parser
             if (ancsPacketParser.hasPendingAssembly()) {
                 ancsPacketParser.flushPendingPartialAttributes()
             }
@@ -1030,22 +1019,17 @@ class AncsBridgeService : Service() {
                             return
                         }
 
-                        // Increment Missed Call or Message counters on Page 1
                         updateWatchCountersForEvent(event)
 
                         if (event.categoryId == AncsPacketParser.CATEGORY_ID_INCOMING_CALL) {
                             activeIncomingCallUids[event.notificationUid] = true
                         }
 
-                        // Request AppIdentifier (0x00), Title (0x01 Contact Name),
-                        // Subtitle (0x02 Phone Number), and Message (0x03 256B Body)
                         enqueueNotificationAttributesRequest(
                             notificationUid = event.notificationUid,
                             forceRequery = (event.eventId == AncsPacketParser.EVENT_ID_NOTIFICATION_MODIFIED)
                         )
 
-                        // Only show immediate placeholder if this is a brand-new Incoming Call that hasn't
-                        // received its Data Source attributes yet; for messages, wait for real Data Source!
                         if (event.categoryId == AncsPacketParser.CATEGORY_ID_INCOMING_CALL &&
                             realDataAssembledForUid[event.notificationUid] != true
                         ) {
@@ -1186,13 +1170,11 @@ class AncsBridgeService : Service() {
         if (isFromRealDataSource) {
             realDataAssembledForUid[alert.notificationUid] = true
 
-            // Release the GATT queue lock if we were waiting on Data Source for this UID
             val activeOp = synchronized(gattQueueLock) { activeInFlightOperation }
             if (activeOp is GattOperation.RequestNotificationAttributes) {
                 completeCurrentGattOperation()
             }
 
-            // Update raw ANCS attributes in state for Page 2 live inspection
             _bridgeState.value = _bridgeState.value.copy(
                 lastRawAppId = alert.rawAppId.ifBlank { "(empty)" },
                 lastRawTitle = alert.rawTitle.ifBlank { "(empty)" },
@@ -1206,9 +1188,6 @@ class AncsBridgeService : Service() {
                 }\""
             )
 
-            // If this is an active Incoming Call and iOS only returned a phone number so far
-            // (no alphabetic letters in title yet), re-query Control Point after 550ms / 1250ms
-            // to catch iOS Contacts asynchronous name resolution!
             if (alert.categoryId == AncsPacketParser.CATEGORY_ID_INCOMING_CALL &&
                 activeIncomingCallUids.containsKey(alert.notificationUid)
             ) {
@@ -1228,7 +1207,6 @@ class AncsBridgeService : Service() {
                 }
             }
         } else if (realDataAssembledForUid[alert.notificationUid] == true) {
-            // Never allow a fallback to overwrite an already-assembled real Data Source notification!
             return
         }
 
@@ -1282,7 +1260,7 @@ class AncsBridgeService : Service() {
                 "op2r:ancs_alert_wakeup"
             )
             wakeLock.acquire(5000L)
-        } catch (_: Exception) {}
+        } catch (ignored: Exception) {}
     }
 
     private fun triggerWatchHapticFeedback(isIncomingCall: Boolean) {
@@ -1303,7 +1281,7 @@ class AncsBridgeService : Service() {
                 longArrayOf(0, 180, 90, 220)
             }
             vibrator.vibrate(VibrationEffect.createWaveform(timings, -1))
-        } catch (_: Exception) {}
+        } catch (ignored: Exception) {}
     }
 
     private fun postIncomingCallWatchNotification(alert: AncsPacketParser.AssembledAncsNotification) {
@@ -1467,10 +1445,6 @@ class AncsBridgeService : Service() {
         )
     }
 
-    // =========================================================================
-    // BOND STATE RECEIVER (AUTO-REDISCOVER ANCS WHEN SMP PAIRING COMPLETES)
-    // =========================================================================
-
     private val bondStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
@@ -1510,7 +1484,7 @@ class AncsBridgeService : Service() {
     private fun unregisterBondStateReceiver() {
         try {
             unregisterReceiver(bondStateReceiver)
-        } catch (_: Exception) {}
+        } catch (ignored: Exception) {}
     }
 
     private fun createNotificationChannels() {
@@ -1576,7 +1550,7 @@ class AncsBridgeService : Service() {
     private fun closeActiveGatt() {
         try {
             activeGatt?.close()
-        } catch (_: Exception) {
+        } catch (ignored: Exception) {
         } finally {
             activeGatt = null
             notificationSourceCharacteristic = null
@@ -1591,11 +1565,11 @@ class AncsBridgeService : Service() {
         clearGattQueue()
         try {
             activeGatt?.disconnect()
-        } catch (_: Exception) {}
+        } catch (ignored: Exception) {}
         closeActiveGatt()
         try {
             gattServer?.close()
-        } catch (_: Exception) {
+        } catch (ignored: Exception) {
         } finally {
             gattServer = null
         }
